@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 
+import { BrandMark } from "@/components/brand-logo"
 import { Dashboard } from "@/components/dashboard"
 import { LoginPage } from "@/components/login-page"
 import { api, APIError, type State } from "@/lib/api"
@@ -56,8 +57,11 @@ export function App() {
 
   if (checking) {
     return (
-      <main className="grid min-h-svh place-items-center text-sm text-muted-foreground">
-        正在加载…
+      <main className="grid min-h-svh place-items-center bg-muted/30">
+        <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+          <BrandMark className="size-11 animate-pulse" />
+          <span>正在加载…</span>
+        </div>
       </main>
     )
   }
