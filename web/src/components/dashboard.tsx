@@ -839,30 +839,23 @@ function ShareHistoryList({
   }
 
   return (
-    <div className="overflow-x-auto">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>分享 URL</TableHead>
-            <TableHead>创建时间</TableHead>
-            <TableHead>有效期</TableHead>
-            <TableHead className="w-24">
-              <span className="sr-only">操作</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {shares.map((share) => (
-            <TableRow key={share.id}>
-              <TableCell className="max-w-64">
-                <p className="truncate font-mono text-xs text-muted-foreground">
-                  {share.url}
-                </p>
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
-                {formatShareTime(share.created_at)}
-              </TableCell>
-              <TableCell>
+    <div className="flex min-w-0 flex-col gap-3">
+      {shares.map((share) => (
+        <Card key={share.id} size="sm" className="min-w-0">
+          <CardHeader>
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <CardTitle>
+                  {share.permanent ? "永久分享" : "限时分享"}
+                </CardTitle>
+                <CardDescription>
+                  创建于 {formatShareTime(share.created_at)}
+                  {!share.permanent && share.expires_at
+                    ? `，有效至 ${formatShareTime(share.expires_at)}`
+                    : ""}
+                </CardDescription>
+              </div>
+              <div className="shrink-0">
                 <Badge
                   variant={
                     share.expired
@@ -876,33 +869,39 @@ function ShareHistoryList({
                     ? "已过期"
                     : share.permanent
                       ? "永久"
-                      : formatShareTime(share.expires_at ?? "")}
+                      : "有效"}
                 </Badge>
-              </TableCell>
-              <TableCell>
-                <div className="flex justify-end gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => onCopy(share.url)}
-                  >
-                    <CopyIcon />
-                    <span className="sr-only">复制分享 URL</span>
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => onView(share)}
-                  >
-                    <QrCodeIcon />
-                    <span className="sr-only">查看分享详情</span>
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+            <Input
+              aria-label="分享 URL"
+              readOnly
+              value={share.url}
+              className="min-w-0 flex-1 font-mono text-xs"
+            />
+            <div className="flex shrink-0 justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => onCopy(share.url)}
+              >
+                <CopyIcon />
+                <span className="sr-only">复制分享 URL</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => onView(share)}
+              >
+                <QrCodeIcon />
+                <span className="sr-only">查看分享详情</span>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
     </div>
   )
 }
@@ -2066,7 +2065,7 @@ function ShareDialog({
         }
       }}
     >
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>分享 {target?.name ?? ""}</DialogTitle>
           <DialogDescription>
@@ -2262,10 +2261,14 @@ function ShareURL({
   onCopy: (value: string) => void
 }) {
   return (
-    <Field>
+    <Field className="min-w-0">
       <FieldLabel>{label}</FieldLabel>
-      <div className="flex gap-2">
-        <Input readOnly value={value} className="font-mono text-xs" />
+      <div className="flex min-w-0 gap-2">
+        <Input
+          readOnly
+          value={value}
+          className="min-w-0 flex-1 font-mono text-xs"
+        />
         <Button variant="outline" size="icon" onClick={() => onCopy(value)}>
           <CopyIcon />
           <span className="sr-only">复制</span>
