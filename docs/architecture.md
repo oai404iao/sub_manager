@@ -22,12 +22,17 @@
 │   ├── protocol/               # URI、Xray JSON、订阅、Mihomo YAML 解析/导出
 │   ├── share/                  # HMAC 签名
 │   ├── store/                  # SQLite schema 与查询
+│   ├── version/                # 构建版本、提交与构建时间
 │   └── webassets/              # go:embed 前端产物
 ├── web/
 │   └── src/
 │       ├── components/ui/      # shadcn 官方源码组件
 │       ├── components/         # 业务组件
 │       └── lib/                # API client 与类型
+├── scripts/                    # 版本更新、发布包与标签发布
+├── .github/workflows/          # CI、GitHub Release 与 GHCR 发布
+├── Dockerfile                  # Node/Go 多阶段构建与非 root 运行镜像
+├── compose.example.yaml        # 持久卷和安全选项部署示例
 └── docs/
     ├── protocols/              # 协议配置项与兼容性说明
     └── implementation-plan.md
@@ -50,7 +55,19 @@
 - `/api/nodes`、`/api/groups`、`/api/subscriptions`：CRUD/导入。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
 - `/api/shares`：生成已签名 URL 与二维码地址。
+- `/api/version`：无需鉴权的构建版本信息。
+- `/healthz`：无需鉴权的容器健康检查。
 - `/s?...`：无需登录、验证签名后输出订阅或节点内容。
 
 后续可在不改变前端领域模型的情况下，将 SQLite Store 替换为 PostgreSQL，
 或增加多用户 `owner_id`。
+
+## 构建与发布
+
+前端由 Vite 输出到 `internal/webassets/dist`，Go 使用 `go:embed all:dist`
+打入服务器二进制。生产构建通过链接参数写入 `VERSION`、Git 提交和 UTC
+构建时间。
+
+Docker 构建分为 Node 前端、Go 静态二进制和 Alpine 运行时三层。运行时
+使用固定非 root UID、只持久化 `/data`，首个发布流水线生成
+`linux/amd64` 镜像。

@@ -1,4 +1,4 @@
-module submanager
+module github.com/oai404iao/sub_manager
 
 go 1.26
 

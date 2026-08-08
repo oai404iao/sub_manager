@@ -1,5 +1,6 @@
 /bin/
 /data/
+/dist/
 /internal/webassets/dist/*
 !/internal/webassets/dist/index.html
 /web/node_modules/

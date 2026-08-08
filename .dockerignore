@@ -1,0 +1,14 @@
+.git
+.github
+.worktrees
+.env
+.env.*
+bin
+data
+dist
+web/node_modules
+web/dist
+internal/webassets/dist
+*.db
+*.db-shm
+*.db-wal

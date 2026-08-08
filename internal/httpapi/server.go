@@ -17,13 +17,14 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"submanager/internal/auth"
-	"submanager/internal/config"
-	"submanager/internal/model"
-	"submanager/internal/protocol"
-	"submanager/internal/share"
-	"submanager/internal/store"
-	"submanager/internal/webassets"
+	"github.com/oai404iao/sub_manager/internal/auth"
+	"github.com/oai404iao/sub_manager/internal/config"
+	"github.com/oai404iao/sub_manager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/protocol"
+	"github.com/oai404iao/sub_manager/internal/share"
+	"github.com/oai404iao/sub_manager/internal/store"
+	"github.com/oai404iao/sub_manager/internal/version"
+	"github.com/oai404iao/sub_manager/internal/webassets"
 )
 
 const sessionCookie = "subman_session"
@@ -47,6 +48,8 @@ func New(cfg config.Config, store *store.Store) *Server {
 
 func (s *Server) Handler() http.Handler {
 	root := http.NewServeMux()
+	root.HandleFunc("GET /healthz", s.health)
+	root.HandleFunc("GET /api/version", s.buildInfo)
 	root.HandleFunc("POST /api/auth/login", s.login)
 
 	api := http.NewServeMux()
@@ -70,6 +73,16 @@ func (s *Server) Handler() http.Handler {
 	root.HandleFunc("GET /s", s.publicShare)
 	root.Handle("/", spaHandler())
 	return s.recoverAndLog(root)
+}
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) buildInfo(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, version.Current())
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {

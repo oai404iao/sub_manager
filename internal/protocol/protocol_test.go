@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"submanager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/model"
 )
 
 func TestVLESSRealityRoundTrip(t *testing.T) {

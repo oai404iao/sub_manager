@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,12 +12,20 @@ import (
 	"syscall"
 	"time"
 
-	"submanager/internal/config"
-	"submanager/internal/httpapi"
-	"submanager/internal/store"
+	"github.com/oai404iao/sub_manager/internal/config"
+	"github.com/oai404iao/sub_manager/internal/httpapi"
+	"github.com/oai404iao/sub_manager/internal/store"
+	"github.com/oai404iao/sub_manager/internal/version"
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version information and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
+
 	cfg := config.Load()
 	database, err := store.Open(cfg.DBPath, cfg.AdminUser, cfg.AdminPassword)
 	if err != nil {
@@ -33,7 +43,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Sub Manager listening on %s", cfg.Addr)
+		log.Printf("Sub Manager %s listening on %s", version.Current().Version, cfg.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}

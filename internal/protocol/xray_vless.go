@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"submanager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/model"
 )
 
 const (

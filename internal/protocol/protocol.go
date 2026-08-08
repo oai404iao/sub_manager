@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"submanager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/model"
 )
 
 func ParseText(input string) ([]model.Node, error) {

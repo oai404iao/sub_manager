@@ -13,8 +13,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"submanager/internal/auth"
-	"submanager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/auth"
+	"github.com/oai404iao/sub_manager/internal/model"
 )
 
 type Store struct {

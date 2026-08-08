@@ -1,0 +1,27 @@
+name: sub-manager
+
+services:
+  sub-manager:
+    image: ${SUBMAN_IMAGE:-ghcr.io/oai404iao/sub_manager:latest}
+    container_name: sub-manager
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${SUBMAN_PORT:-8080}:8080"
+    environment:
+      SUBMAN_ADDR: 0.0.0.0:8080
+      SUBMAN_DB: /data/sub-manager.db
+      SUBMAN_ADMIN_USER: ${SUBMAN_ADMIN_USER:-admin}
+      SUBMAN_ADMIN_PASSWORD: ${SUBMAN_ADMIN_PASSWORD:?set SUBMAN_ADMIN_PASSWORD in .env}
+      SUBMAN_BASE_URL: ${SUBMAN_BASE_URL:-http://127.0.0.1:8080}
+      SUBMAN_SIGNING_KEY: ${SUBMAN_SIGNING_KEY:?set SUBMAN_SIGNING_KEY in .env}
+      SUBMAN_SECURE_COOKIE: ${SUBMAN_SECURE_COOKIE:-false}
+    volumes:
+      - sub-manager-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  sub-manager-data:

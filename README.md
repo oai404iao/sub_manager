@@ -3,6 +3,9 @@
 面向 Xray 与 Mihomo 的轻量订阅、节点和分组管理系统。当前首期支持
 VLESS 与 SOCKS5，React 前端会被打包并嵌入 Go 单文件程序。
 
+[![CI](https://github.com/oai404iao/sub_manager/actions/workflows/ci.yml/badge.svg)](https://github.com/oai404iao/sub_manager/actions/workflows/ci.yml)
+[![Release](https://github.com/oai404iao/sub_manager/actions/workflows/release.yml/badge.svg)](https://github.com/oai404iao/sub_manager/actions/workflows/release.yml)
+
 ## 当前实现
 
 - Cookie Session 登录鉴权（密码使用 bcrypt，Session 仅保存 SHA-256 摘要）
@@ -21,7 +24,7 @@ VLESS 与 SOCKS5，React 前端会被打包并嵌入 Go 单文件程序。
 
 ```bash
 cp .env.example .env
-npm --prefix web install
+npm --prefix web ci
 make build
 ./bin/sub-manager
 ```
@@ -37,6 +40,83 @@ npm --prefix web run dev
 ```
 
 Vite 会将 `/api`、`/s` 代理到 `127.0.0.1:8080`。
+
+查看构建版本：
+
+```bash
+./bin/sub-manager --version
+curl http://127.0.0.1:8080/api/version
+```
+
+`GET /healthz` 是无需鉴权的容器健康检查端点。
+
+## Docker
+
+发布镜像位于 `ghcr.io/oai404iao/sub_manager`。运行固定版本：
+
+```bash
+docker run -d \
+  --name sub-manager \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v sub-manager-data:/data \
+  -e SUBMAN_ADMIN_PASSWORD='replace-with-a-strong-password' \
+  -e SUBMAN_SIGNING_KEY="$(openssl rand -hex 32)" \
+  -e SUBMAN_BASE_URL='http://127.0.0.1:8080' \
+  ghcr.io/oai404iao/sub_manager:0.1.0
+```
+
+镜像默认以非 root 用户运行，监听 `0.0.0.0:8080`，数据库写入
+`/data/sub-manager.db`。
+
+本地构建：
+
+```bash
+make docker-build
+```
+
+Compose 示例：
+
+```bash
+cp .env.example .env
+# 修改 .env 中的管理员密码、签名密钥和公开访问地址
+docker compose -f compose.example.yaml up -d
+docker compose -f compose.example.yaml ps
+```
+
+如需固定镜像版本，可在 `.env` 中添加：
+
+```dotenv
+SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.0
+```
+
+## 版本与发布
+
+项目采用 SemVer。`VERSION`、`web/package.json` 和
+`web/package-lock.json` 必须保持一致。
+
+准备下一个版本：
+
+```bash
+./scripts/set-version.sh 0.2.0
+```
+
+发布脚本只允许从已同步且干净的 `main` 分支运行。它会执行完整检查、
+构建 Linux amd64 发布包、创建带注释的 `vX.Y.Z` 标签并推送：
+
+```bash
+./scripts/release.sh 0.2.0
+```
+
+标签推送后，GitHub Actions 会：
+
+1. 重新执行 Go、TypeScript、ESLint 和生产构建检查；
+2. 创建 Linux amd64 压缩包和 `SHA256SUMS`；
+3. 发布 GHCR 镜像的完整版本、主次版本、主版本、`latest` 和提交标签；
+4. 生成镜像 SBOM、构建来源证明和 GitHub Release。
+
+日常提交与 Pull Request 由 `.github/workflows/ci.yml` 校验；版本标签由
+`.github/workflows/release.yml` 发布。
 
 ## 文档
 
