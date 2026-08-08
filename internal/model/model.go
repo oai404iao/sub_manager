@@ -40,9 +40,20 @@ type Node struct {
 	ServiceName    string            `json:"service_name,omitempty"`
 	Authority      string            `json:"authority,omitempty"`
 	HeaderType     string            `json:"header_type,omitempty"`
+	XHTTPMode      string            `json:"xhttp_mode,omitempty"`
+	XHTTPExtra     map[string]any    `json:"xhttp_extra,omitempty"`
+	KCPMTU         int               `json:"kcp_mtu,omitempty"`
+	KCPTTI         int               `json:"kcp_tti,omitempty"`
+	GRPCMultiMode  bool              `json:"grpc_multi_mode"`
+	ECHConfigList  string            `json:"ech_config_list,omitempty"`
+	PinnedPeerCert string            `json:"pinned_peer_cert_sha256,omitempty"`
+	VerifyPeerName string            `json:"verify_peer_cert_by_name,omitempty"`
+	MLDSA65Verify  string            `json:"mldsa65_verify,omitempty"`
+	FinalMask      map[string]any    `json:"final_mask,omitempty"`
 	UDP            bool              `json:"udp"`
 	TLS            bool              `json:"tls"`
 	Extra          map[string]string `json:"extra,omitempty"`
+	XrayOutbound   map[string]any    `json:"xray_outbound,omitempty"`
 	GroupIDs       []int64           `json:"group_ids"`
 	SubscriptionID *int64            `json:"subscription_id,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`

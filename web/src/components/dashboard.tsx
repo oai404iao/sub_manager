@@ -1,7 +1,9 @@
 import { useMemo, useState, type FormEvent } from "react"
 import {
   BoxesIcon,
+  Code2Icon,
   CopyIcon,
+  DownloadIcon,
   FileInputIcon,
   LinkIcon,
   LogOutIcon,
@@ -97,13 +99,34 @@ const protocolItems = [
   { label: "VLESS", value: "vless" },
   { label: "SOCKS5", value: "socks5" },
 ]
-const networkItems = ["tcp", "ws", "grpc", "httpupgrade", "xhttp"].map(
-  (value) => ({ label: value.toUpperCase(), value }),
-)
+const networkItems = [
+  { label: "RAW", value: "raw" },
+  { label: "XHTTP", value: "xhttp" },
+  { label: "mKCP", value: "mkcp" },
+  { label: "gRPC", value: "grpc" },
+  { label: "WebSocket", value: "websocket" },
+  { label: "HTTPUpgrade", value: "httpupgrade" },
+  { label: "Hysteria", value: "hysteria" },
+]
 const securityItems = ["none", "tls", "reality"].map((value) => ({
   label: value.toUpperCase(),
   value,
 }))
+const flowItems = [
+  { label: "无 Flow", value: "none" },
+  { label: "xtls-rprx-vision", value: "xtls-rprx-vision" },
+  {
+    label: "xtls-rprx-vision-udp443",
+    value: "xtls-rprx-vision-udp443",
+  },
+]
+const xhttpModeItems = ["auto", "packet-up", "stream-up", "stream-one"].map(
+  (value) => ({ label: value, value }),
+)
+const grpcModeItems = [
+  { label: "gun（默认）", value: "gun" },
+  { label: "multi", value: "multi" },
+]
 
 const blankNode: Node = {
   id: 0,
@@ -112,14 +135,132 @@ const blankNode: Node = {
   server: "",
   port: 443,
   encryption: "none",
-  network: "tcp",
-  security: "none",
+  network: "raw",
+  security: "tls",
+  fingerprint: "chrome",
   allow_insecure: false,
+  grpc_multi_mode: false,
   udp: true,
   tls: false,
   group_ids: [],
   created_at: "",
   updated_at: "",
+}
+
+function mergeNodeIntoXray(
+  source: Record<string, unknown>,
+  node: Node,
+): Record<string, unknown> {
+  const outbound = structuredClone(source)
+  outbound.protocol = "vless"
+  outbound.tag = node.name
+
+  const settings = recordValue(outbound.settings)
+  delete settings.vnext
+  settings.address = node.server
+  settings.port = node.port
+  settings.id = node.uuid ?? ""
+  settings.encryption = node.encryption || "none"
+  if (node.flow) settings.flow = node.flow
+  else delete settings.flow
+  outbound.settings = settings
+
+  const stream = recordValue(outbound.streamSettings)
+  stream.method = node.network || "raw"
+  delete stream.network
+  stream.security = node.security || "none"
+
+  switch (node.network) {
+    case "raw": {
+      const raw = recordValue(stream.rawSettings)
+      const header = recordValue(raw.header)
+      setText(header, "type", node.header_type)
+      raw.header = header
+      stream.rawSettings = raw
+      break
+    }
+    case "xhttp": {
+      const xhttp = recordValue(stream.xhttpSettings)
+      setText(xhttp, "host", node.host)
+      setText(xhttp, "path", node.path)
+      setText(xhttp, "mode", node.xhttp_mode)
+      if (node.xhttp_extra) xhttp.extra = node.xhttp_extra
+      stream.xhttpSettings = xhttp
+      break
+    }
+    case "mkcp": {
+      const kcp = recordValue(stream.kcpSettings)
+      if (node.kcp_mtu) kcp.mtu = node.kcp_mtu
+      if (node.kcp_tti) kcp.tti = node.kcp_tti
+      delete kcp.header
+      delete kcp.seed
+      stream.kcpSettings = kcp
+      break
+    }
+    case "grpc": {
+      const grpc = recordValue(stream.grpcSettings)
+      setText(grpc, "serviceName", node.service_name)
+      setText(grpc, "authority", node.authority)
+      grpc.multiMode = node.grpc_multi_mode
+      stream.grpcSettings = grpc
+      break
+    }
+    case "websocket": {
+      const ws = recordValue(stream.wsSettings)
+      setText(ws, "host", node.host)
+      setText(ws, "path", node.path)
+      stream.wsSettings = ws
+      break
+    }
+    case "httpupgrade": {
+      const upgrade = recordValue(stream.httpupgradeSettings)
+      setText(upgrade, "host", node.host)
+      setText(upgrade, "path", node.path)
+      stream.httpupgradeSettings = upgrade
+      break
+    }
+  }
+
+  if (node.security === "tls") {
+    const tls = recordValue(stream.tlsSettings)
+    setText(tls, "serverName", node.sni)
+    setText(tls, "fingerprint", node.fingerprint)
+    if (node.alpn?.length) tls.alpn = node.alpn
+    else delete tls.alpn
+    setText(tls, "echConfigList", node.ech_config_list)
+    setText(tls, "pinnedPeerCertSha256", node.pinned_peer_cert_sha256)
+    setText(tls, "verifyPeerCertByName", node.verify_peer_cert_by_name)
+    delete tls.allowInsecure
+    stream.tlsSettings = tls
+  } else if (node.security === "reality") {
+    const reality = recordValue(stream.realitySettings)
+    setText(reality, "serverName", node.sni)
+    setText(reality, "fingerprint", node.fingerprint)
+    setText(reality, "password", node.public_key)
+    delete reality.publicKey
+    setText(reality, "shortId", node.short_id)
+    setText(reality, "spiderX", node.spider_x)
+    setText(reality, "mldsa65Verify", node.mldsa65_verify)
+    stream.realitySettings = reality
+  }
+  if (node.final_mask) stream.finalmask = node.final_mask
+  outbound.streamSettings = stream
+  return outbound
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function setText(
+  target: Record<string, unknown>,
+  key: string,
+  value: string | undefined,
+) {
+  if (value) target[key] = value
+  else delete target[key]
 }
 
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
@@ -731,7 +872,8 @@ function ImportDialog({
           <DialogHeader>
             <DialogTitle>导入节点或订阅</DialogTitle>
             <DialogDescription>
-              支持 VLESS/SOCKS5 链接、Base64 订阅和 Mihomo YAML。
+              支持 VLESS/SOCKS5 链接、Xray JSON、Base64 订阅和 Mihomo
+              YAML。
             </DialogDescription>
           </DialogHeader>
           <Tabs
@@ -841,6 +983,14 @@ function NodeDialog({
 }) {
   const [draft, setDraft] = useState<Node>(node)
   const [error, setError] = useState("")
+  const [editorMode, setEditorMode] = useState<"basic" | "advanced">("basic")
+  const [advancedJSON, setAdvancedJSON] = useState(() =>
+    JSON.stringify(
+      node.xray_outbound ?? mergeNodeIntoXray({}, node),
+      null,
+      2,
+    ),
+  )
 
   function update<K extends keyof Node>(key: K, value: Node[K]) {
     setDraft((current) => ({ ...current, [key]: value }))
@@ -850,14 +1000,36 @@ function NodeDialog({
     event.preventDefault()
     setError("")
     try {
-      await api(draft.id ? `/api/nodes/${draft.id}` : "/api/nodes", {
+      let payload: Node = draft
+      if (draft.protocol === "vless") {
+        const parsed = JSON.parse(advancedJSON) as Record<string, unknown>
+        payload = {
+          ...draft,
+          xray_outbound:
+            editorMode === "advanced"
+              ? parsed
+              : mergeNodeIntoXray(parsed, draft),
+        }
+      } else {
+        payload = { ...draft, xray_outbound: undefined }
+      }
+      const requestBody: Partial<Node> = { ...payload }
+      delete requestBody.created_at
+      delete requestBody.updated_at
+      await api(payload.id ? `/api/nodes/${payload.id}` : "/api/nodes", {
         method: draft.id ? "PUT" : "POST",
-        body: JSON.stringify(draft),
+        body: JSON.stringify(requestBody),
       })
       onOpenChange(false)
       await onSaved()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "保存失败")
+      setError(
+        caught instanceof SyntaxError
+          ? `Xray JSON 无效：${caught.message}`
+          : caught instanceof Error
+            ? caught.message
+            : "保存失败",
+      )
     }
   }
 
@@ -872,16 +1044,17 @@ function NodeDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-3xl">
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>{draft.id ? "编辑节点" : "新建节点"}</DialogTitle>
             <DialogDescription>
-              首期提供 VLESS 与 SOCKS5 的常用配置项。
+              VLESS 对齐 Xray-core v26.7.28；完整字段可在高级 JSON
+              中编辑。
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldGroup className="grid gap-4 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="node-name">名称</FieldLabel>
                 <Input
@@ -960,167 +1133,497 @@ function NodeDialog({
                   </SelectContent>
                 </Select>
               </Field>
-            </div>
+            </FieldGroup>
 
             <Separator />
 
             {draft.protocol === "vless" ? (
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field className="sm:col-span-2">
-                  <FieldLabel htmlFor="node-uuid">UUID</FieldLabel>
-                  <Input
-                    id="node-uuid"
-                    value={draft.uuid ?? ""}
-                    onChange={(event) => update("uuid", event.target.value)}
-                  />
-                </Field>
-                <Field>
-                  <FieldLabel>传输</FieldLabel>
-                  <Select
-                    items={networkItems}
-                    value={draft.network ?? "tcp"}
-                    onValueChange={(value) =>
-                      update("network", value ?? undefined)
+              <Tabs
+                value={editorMode}
+                onValueChange={(value) => {
+                  const next = value as "basic" | "advanced"
+                  if (next === "advanced" && editorMode === "basic") {
+                    try {
+                      const current = JSON.parse(advancedJSON) as Record<
+                        string,
+                        unknown
+                      >
+                      setAdvancedJSON(
+                        JSON.stringify(mergeNodeIntoXray(current, draft), null, 2),
+                      )
+                    } catch {
+                      setAdvancedJSON(
+                        JSON.stringify(mergeNodeIntoXray({}, draft), null, 2),
+                      )
                     }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent alignItemWithTrigger={false}>
-                      <SelectGroup>
-                        {networkItems.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field>
-                  <FieldLabel>安全层</FieldLabel>
-                  <Select
-                    items={securityItems}
-                    value={draft.security ?? "none"}
-                    onValueChange={(value) =>
-                      update("security", value ?? undefined)
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent alignItemWithTrigger={false}>
-                      <SelectGroup>
-                        {securityItems.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="node-flow">Flow</FieldLabel>
-                  <Input
-                    id="node-flow"
-                    placeholder="xtls-rprx-vision"
-                    value={draft.flow ?? ""}
-                    onChange={(event) => update("flow", event.target.value)}
-                  />
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="node-sni">SNI</FieldLabel>
-                  <Input
-                    id="node-sni"
-                    value={draft.sni ?? ""}
-                    onChange={(event) => update("sni", event.target.value)}
-                  />
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="node-fingerprint">
-                    客户端指纹
-                  </FieldLabel>
-                  <Input
-                    id="node-fingerprint"
-                    placeholder="chrome"
-                    value={draft.fingerprint ?? ""}
-                    onChange={(event) =>
-                      update("fingerprint", event.target.value)
-                    }
-                  />
-                </Field>
-                {draft.security === "reality" ? (
-                  <>
-                    <Field>
-                      <FieldLabel htmlFor="node-public-key">
-                        REALITY Public Key
+                  }
+                  setEditorMode(next)
+                }}
+              >
+                <TabsList>
+                  <TabsTrigger value="basic">常用字段</TabsTrigger>
+                  <TabsTrigger value="advanced">
+                    <Code2Icon />
+                    Xray 完整 JSON
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent value="basic" className="mt-4">
+                  <FieldGroup className="grid gap-4 sm:grid-cols-2">
+                    <Field className="sm:col-span-2">
+                      <FieldLabel htmlFor="node-uuid">
+                        ID / UUID
                       </FieldLabel>
                       <Input
-                        id="node-public-key"
-                        value={draft.public_key ?? ""}
+                        id="node-uuid"
+                        value={draft.uuid ?? ""}
                         onChange={(event) =>
-                          update("public_key", event.target.value)
+                          update("uuid", event.target.value)
                         }
                       />
+                      <FieldDescription>
+                        可使用 UUID，或不超过 30 字节的自定义字符串；分享时按
+                        Xray UUIDv5 规则映射。
+                      </FieldDescription>
                     </Field>
-                    <Field>
-                      <FieldLabel htmlFor="node-short-id">
-                        REALITY Short ID
+                    <Field className="sm:col-span-2">
+                      <FieldLabel htmlFor="node-encryption">
+                        VLESS Encryption
                       </FieldLabel>
-                      <Input
-                        id="node-short-id"
-                        value={draft.short_id ?? ""}
+                      <Textarea
+                        id="node-encryption"
+                        className="min-h-20 font-mono text-xs"
+                        value={draft.encryption ?? "none"}
                         onChange={(event) =>
-                          update("short_id", event.target.value)
+                          update("encryption", event.target.value)
                         }
                       />
-                    </Field>
-                  </>
-                ) : null}
-                {["ws", "httpupgrade", "xhttp"].includes(
-                  draft.network ?? "",
-                ) ? (
-                  <>
-                    <Field>
-                      <FieldLabel htmlFor="node-host">Host</FieldLabel>
-                      <Input
-                        id="node-host"
-                        value={draft.host ?? ""}
-                        onChange={(event) =>
-                          update("host", event.target.value)
-                        }
-                      />
+                      <FieldDescription>
+                        必须填写；关闭时为 none。新加密格式以
+                        mlkem768x25519plus 开头。
+                      </FieldDescription>
                     </Field>
                     <Field>
-                      <FieldLabel htmlFor="node-path">Path</FieldLabel>
-                      <Input
-                        id="node-path"
-                        value={draft.path ?? ""}
-                        onChange={(event) =>
-                          update("path", event.target.value)
+                      <FieldLabel>Flow</FieldLabel>
+                      <Select
+                        items={flowItems}
+                        value={draft.flow || "none"}
+                        onValueChange={(value) =>
+                          update("flow", value === "none" ? "" : (value ?? ""))
                         }
-                      />
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent alignItemWithTrigger={false}>
+                          <SelectGroup>
+                            {flowItems.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
                     </Field>
-                  </>
-                ) : null}
-                {draft.network === "grpc" ? (
-                  <Field className="sm:col-span-2">
-                    <FieldLabel htmlFor="node-service-name">
-                      gRPC Service Name
+                    <Field>
+                      <FieldLabel>传输方法</FieldLabel>
+                      <Select
+                        items={networkItems}
+                        value={draft.network ?? "raw"}
+                        onValueChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            network: value ?? undefined,
+                            security:
+                              value === "hysteria"
+                                ? "tls"
+                                : current.security,
+                          }))
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent alignItemWithTrigger={false}>
+                          <SelectGroup>
+                            {networkItems.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field>
+                      <FieldLabel>传输安全</FieldLabel>
+                      <Select
+                        items={securityItems}
+                        value={draft.security ?? "none"}
+                        onValueChange={(value) =>
+                          update("security", value ?? undefined)
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent alignItemWithTrigger={false}>
+                          <SelectGroup>
+                            {securityItems.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {draft.security === "none" &&
+                    (draft.encryption ?? "none") === "none" ? (
+                      <Alert variant="destructive" className="sm:col-span-2">
+                        <AlertTitle>公开地址禁止明文 VLESS</AlertTitle>
+                        <AlertDescription>
+                          Xray-core v26.7.28 要求公开服务端使用 TLS、REALITY
+                          或 VLESS Encryption。
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
+                    {draft.security !== "none" ? (
+                      <>
+                        <Field>
+                          <FieldLabel htmlFor="node-sni">
+                            Server Name / SNI
+                          </FieldLabel>
+                          <Input
+                            id="node-sni"
+                            value={draft.sni ?? ""}
+                            onChange={(event) =>
+                              update("sni", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-fingerprint">
+                            uTLS 指纹
+                          </FieldLabel>
+                          <Input
+                            id="node-fingerprint"
+                            placeholder="chrome"
+                            value={draft.fingerprint ?? ""}
+                            onChange={(event) =>
+                              update("fingerprint", event.target.value)
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : null}
+                    {draft.security === "tls" ? (
+                      <>
+                        <Field>
+                          <FieldLabel htmlFor="node-alpn">ALPN</FieldLabel>
+                          <Input
+                            id="node-alpn"
+                            placeholder="h2,http/1.1"
+                            value={(draft.alpn ?? []).join(",")}
+                            onChange={(event) =>
+                              update(
+                                "alpn",
+                                event.target.value
+                                  .split(",")
+                                  .map((value) => value.trim())
+                                  .filter(Boolean),
+                              )
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-verify-peer">
+                            verifyPeerCertByName
+                          </FieldLabel>
+                          <Input
+                            id="node-verify-peer"
+                            value={draft.verify_peer_cert_by_name ?? ""}
+                            onChange={(event) =>
+                              update(
+                                "verify_peer_cert_by_name",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </Field>
+                        <Field className="sm:col-span-2">
+                          <FieldLabel htmlFor="node-pinned-cert">
+                            pinnedPeerCertSha256
+                          </FieldLabel>
+                          <Input
+                            id="node-pinned-cert"
+                            className="font-mono text-xs"
+                            value={draft.pinned_peer_cert_sha256 ?? ""}
+                            onChange={(event) =>
+                              update(
+                                "pinned_peer_cert_sha256",
+                                event.target.value,
+                              )
+                            }
+                          />
+                          <FieldDescription>
+                            allowInsecure 已被移除；需要固定证书时使用 SHA-256。
+                          </FieldDescription>
+                        </Field>
+                        <Field className="sm:col-span-2">
+                          <FieldLabel htmlFor="node-ech">
+                            ECH Config List / DNS
+                          </FieldLabel>
+                          <Input
+                            id="node-ech"
+                            value={draft.ech_config_list ?? ""}
+                            onChange={(event) =>
+                              update("ech_config_list", event.target.value)
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : null}
+                    {draft.security === "reality" ? (
+                      <>
+                        <Field className="sm:col-span-2">
+                          <FieldLabel htmlFor="node-public-key">
+                            REALITY password
+                          </FieldLabel>
+                          <Input
+                            id="node-public-key"
+                            className="font-mono text-xs"
+                            value={draft.public_key ?? ""}
+                            onChange={(event) =>
+                              update("public_key", event.target.value)
+                            }
+                          />
+                          <FieldDescription>
+                            旧名 publicKey；最新 Xray 配置字段名为 password。
+                          </FieldDescription>
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-short-id">
+                            REALITY shortId
+                          </FieldLabel>
+                          <Input
+                            id="node-short-id"
+                            value={draft.short_id ?? ""}
+                            onChange={(event) =>
+                              update("short_id", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-spider-x">
+                            REALITY spiderX
+                          </FieldLabel>
+                          <Input
+                            id="node-spider-x"
+                            placeholder="/"
+                            value={draft.spider_x ?? ""}
+                            onChange={(event) =>
+                              update("spider_x", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field className="sm:col-span-2">
+                          <FieldLabel htmlFor="node-mldsa">
+                            REALITY mldsa65Verify
+                          </FieldLabel>
+                          <Textarea
+                            id="node-mldsa"
+                            className="min-h-20 font-mono text-xs"
+                            value={draft.mldsa65_verify ?? ""}
+                            onChange={(event) =>
+                              update("mldsa65_verify", event.target.value)
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : null}
+
+                    {["websocket", "httpupgrade", "xhttp"].includes(
+                      draft.network ?? "",
+                    ) ? (
+                      <>
+                        <Field>
+                          <FieldLabel htmlFor="node-host">Host</FieldLabel>
+                          <Input
+                            id="node-host"
+                            value={draft.host ?? ""}
+                            onChange={(event) =>
+                              update("host", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-path">Path</FieldLabel>
+                          <Input
+                            id="node-path"
+                            value={draft.path ?? ""}
+                            onChange={(event) =>
+                              update("path", event.target.value)
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : null}
+                    {draft.network === "xhttp" ? (
+                      <Field>
+                        <FieldLabel>XHTTP Mode</FieldLabel>
+                        <Select
+                          items={xhttpModeItems}
+                          value={draft.xhttp_mode || "auto"}
+                          onValueChange={(value) =>
+                            update("xhttp_mode", value ?? "auto")
+                          }
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent alignItemWithTrigger={false}>
+                            <SelectGroup>
+                              {xhttpModeItems.map((item) => (
+                                <SelectItem key={item.value} value={item.value}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                    ) : null}
+                    {draft.network === "mkcp" ? (
+                      <>
+                        <Field>
+                          <FieldLabel htmlFor="node-kcp-mtu">
+                            mKCP MTU
+                          </FieldLabel>
+                          <Input
+                            id="node-kcp-mtu"
+                            type="number"
+                            value={draft.kcp_mtu ?? 1350}
+                            onChange={(event) =>
+                              update("kcp_mtu", Number(event.target.value))
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-kcp-tti">
+                            mKCP TTI
+                          </FieldLabel>
+                          <Input
+                            id="node-kcp-tti"
+                            type="number"
+                            value={draft.kcp_tti ?? 50}
+                            onChange={(event) =>
+                              update("kcp_tti", Number(event.target.value))
+                            }
+                          />
+                        </Field>
+                      </>
+                    ) : null}
+                    {draft.network === "grpc" ? (
+                      <>
+                        <Field>
+                          <FieldLabel htmlFor="node-service-name">
+                            gRPC Service Name
+                          </FieldLabel>
+                          <Input
+                            id="node-service-name"
+                            value={draft.service_name ?? ""}
+                            onChange={(event) =>
+                              update("service_name", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor="node-authority">
+                            gRPC Authority
+                          </FieldLabel>
+                          <Input
+                            id="node-authority"
+                            value={draft.authority ?? ""}
+                            onChange={(event) =>
+                              update("authority", event.target.value)
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel>gRPC Mode</FieldLabel>
+                          <Select
+                            items={grpcModeItems}
+                            value={draft.grpc_multi_mode ? "multi" : "gun"}
+                            onValueChange={(value) =>
+                              update("grpc_multi_mode", value === "multi")
+                            }
+                          >
+                            <SelectTrigger className="w-full">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent alignItemWithTrigger={false}>
+                              <SelectGroup>
+                                {grpcModeItems.map((item) => (
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      </>
+                    ) : null}
+                    {draft.network === "raw" ? (
+                      <Field>
+                        <FieldLabel htmlFor="node-header-type">
+                          RAW Header Type
+                        </FieldLabel>
+                        <Input
+                          id="node-header-type"
+                          placeholder="none"
+                          value={draft.header_type ?? ""}
+                          onChange={(event) =>
+                            update("header_type", event.target.value)
+                          }
+                        />
+                      </Field>
+                    ) : null}
+                    {draft.network === "hysteria" ? (
+                      <Alert className="sm:col-span-2">
+                        <AlertTitle>Hysteria 传输需要 TLS</AlertTitle>
+                        <AlertDescription>
+                          auth、masquerade 与 QUIC 参数请在“Xray 完整 JSON”中配置。
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
+                  </FieldGroup>
+                </TabsContent>
+                <TabsContent value="advanced" className="mt-4">
+                  <Field>
+                    <FieldLabel htmlFor="xray-outbound-json">
+                      Xray VLESS OutboundObject
                     </FieldLabel>
-                    <Input
-                      id="node-service-name"
-                      value={draft.service_name ?? ""}
-                      onChange={(event) =>
-                        update("service_name", event.target.value)
-                      }
+                    <Textarea
+                      id="xray-outbound-json"
+                      className="min-h-96 font-mono text-xs"
+                      spellCheck={false}
+                      value={advancedJSON}
+                      onChange={(event) => setAdvancedJSON(event.target.value)}
                     />
+                    <FieldDescription>
+                      支持 v26.7.28 的完整 streamSettings、XHTTP、FinalMask、
+                      Sockopt、Mux、ProxySettings 与 TLS/REALITY 高级字段。
+                    </FieldDescription>
                   </Field>
-                ) : null}
-              </div>
+                </TabsContent>
+              </Tabs>
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2">
+              <FieldGroup className="grid gap-4 sm:grid-cols-2">
                 <Field>
                   <FieldLabel htmlFor="node-username">用户名</FieldLabel>
                   <Input
@@ -1150,7 +1653,7 @@ function NodeDialog({
                     onChange={(event) => update("sni", event.target.value)}
                   />
                 </Field>
-              </div>
+              </FieldGroup>
             )}
           </FieldGroup>
           {error ? (
@@ -1159,6 +1662,16 @@ function NodeDialog({
             </Alert>
           ) : null}
           <DialogFooter>
+            {draft.id && draft.protocol === "vless" ? (
+              <Button
+                variant="outline"
+                render={<a href={`/api/nodes/${draft.id}/xray`} />}
+                nativeButton={false}
+              >
+                <DownloadIcon data-icon="inline-start" />
+                下载 Xray JSON
+              </Button>
+            ) : null}
             <Button type="submit">保存节点</Button>
           </DialogFooter>
         </form>

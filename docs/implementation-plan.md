@@ -15,8 +15,9 @@
 
 - [ ] 节点批量选择、拖拽入组、批量删除/导出
 - [ ] 订阅定时刷新、差异预览、失效节点保留策略
-- [ ] VLESS WS/gRPC/XHTTP/HTTPUpgrade 全字段表单
-- [ ] Mihomo 与 Xray JSON 双向导出
+- [x] VLESS 当前常用字段表单 + 完整 Xray JSON 编辑器
+- [x] Xray VLESS JSON 导入与导出
+- [ ] Mihomo JSON/YAML 双向导出
 - [ ] 节点去重规则（协议 + 服务端 + 端口 + 身份）
 - [ ] 审计日志与登录限流
 

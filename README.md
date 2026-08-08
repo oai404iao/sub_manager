@@ -7,7 +7,10 @@ VLESS 与 SOCKS5，React 前端会被打包并嵌入 Go 单文件程序。
 
 - Cookie Session 登录鉴权（密码使用 bcrypt，Session 仅保存 SHA-256 摘要）
 - SQLite 持久化
-- VLESS / SOCKS5 分享链接导入、Base64 订阅导入、Mihomo YAML 导入
+- VLESS / SOCKS5 分享链接、Xray JSON、Base64 订阅和 Mihomo YAML 导入
+- 对齐 Xray-core v26.7.28 的 VLESS Encryption、当前 transports、
+  TLS/REALITY、XHTTP 分享参数与 UUIDv5 映射
+- Xray VLESS OutboundObject 无损保存、完整 JSON 编辑与下载
 - 节点、分组、订阅管理 API
 - 带过期时间的 HMAC-SHA256 分享 URL
 - “订阅 URL”与“完整节点内容”两类二维码
@@ -41,3 +44,11 @@ Vite 会将 `/api`、`/s` 代理到 `127.0.0.1:8080`。
 - [VLESS 可配置项](docs/protocols/vless.md)
 - [SOCKS5 可配置项](docs/protocols/socks.md)
 - [实现计划](docs/implementation-plan.md)
+
+## 使用官方 Xray 校验生成配置
+
+安装 Xray-core v26.7.28 后运行：
+
+```bash
+XRAY_BIN=/path/to/xray make test-xray
+```

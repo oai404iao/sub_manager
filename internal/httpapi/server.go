@@ -57,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/groups/{id}", s.deleteGroup)
 	api.HandleFunc("POST /api/nodes", s.saveNode)
 	api.HandleFunc("PUT /api/nodes/{id}", s.saveNode)
+	api.HandleFunc("GET /api/nodes/{id}/xray", s.exportXrayNode)
 	api.HandleFunc("DELETE /api/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/nodes/import", s.importNodes)
 	api.HandleFunc("POST /api/subscriptions", s.createSubscription)
@@ -137,6 +138,12 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	for index := range state.Nodes {
+		// Keep legacy/invalid nodes visible so administrators can repair them.
+		if protocol.EnsureXrayOutbound(&state.Nodes[index]) == nil {
+			_ = protocol.ApplyXrayOutbound(&state.Nodes[index])
+		}
+	}
 	writeJSON(w, http.StatusOK, state)
 }
 
@@ -180,7 +187,15 @@ func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) {
 		}
 		node.ID = id
 	}
+	if err := protocol.ApplyXrayOutbound(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	normalizeNode(&node)
+	if err := protocol.EnsureXrayOutbound(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := protocol.Validate(node); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -195,6 +210,26 @@ func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, saved)
+}
+
+func (s *Server) exportXrayNode(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	node, err := s.store.Node(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	data, err := protocol.XrayOutboundJSON(node)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="vless-%d-xray.json"`, id))
+	_, _ = w.Write(data)
 }
 
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
@@ -530,7 +565,7 @@ func normalizeNode(node *model.Node) {
 			node.Encryption = "none"
 		}
 		if node.Network == "" {
-			node.Network = "tcp"
+			node.Network = "raw"
 		}
 		if node.Security == "" {
 			node.Security = "none"

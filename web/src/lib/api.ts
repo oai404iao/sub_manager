@@ -36,9 +36,20 @@ export type Node = {
   service_name?: string
   authority?: string
   header_type?: string
+  xhttp_mode?: string
+  xhttp_extra?: Record<string, unknown>
+  kcp_mtu?: number
+  kcp_tti?: number
+  grpc_multi_mode: boolean
+  ech_config_list?: string
+  pinned_peer_cert_sha256?: string
+  verify_peer_cert_by_name?: string
+  mldsa65_verify?: string
+  final_mask?: Record<string, unknown>
   udp: boolean
   tls: boolean
   extra?: Record<string, string>
+  xray_outbound?: Record<string, unknown>
   group_ids: number[]
   subscription_id?: number
   created_at: string

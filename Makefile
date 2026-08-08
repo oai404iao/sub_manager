@@ -1,4 +1,4 @@
-.PHONY: dev web build test fmt
+.PHONY: dev web build test test-xray fmt
 
 dev:
 	go run ./cmd/server
@@ -12,6 +12,9 @@ build: web
 test:
 	go test ./cmd/... ./internal/...
 	npm --prefix web run typecheck
+
+test-xray:
+	XRAY_BIN="$${XRAY_BIN:-xray}" go test ./internal/protocol -run TestGeneratedOutboundWithOfficialXray -v
 
 fmt:
 	gofmt -w $$(find cmd internal -name '*.go')

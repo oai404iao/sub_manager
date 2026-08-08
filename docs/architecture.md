@@ -19,7 +19,7 @@
 │   ├── config/                 # 环境变量配置
 │   ├── httpapi/                # 路由、JSON API、公开分享
 │   ├── model/                  # 领域模型
-│   ├── protocol/               # VLESS/SOCKS URI、订阅、Mihomo YAML 解析/导出
+│   ├── protocol/               # URI、Xray JSON、订阅、Mihomo YAML 解析/导出
 │   ├── share/                  # HMAC 签名
 │   ├── store/                  # SQLite schema 与查询
 │   └── webassets/              # go:embed 前端产物
@@ -38,7 +38,8 @@
 - `users`：管理员账号。
 - `sessions`：Session token 摘要、用户、过期时间。
 - `groups`：用户维护的节点分组。
-- `nodes`：规范化节点字段和原始扩展 JSON。
+- `nodes`：规范化节点字段和原始扩展 JSON；VLESS 节点同时保存完整
+  `xray_outbound`，用于无损往返当前 Xray 配置。
 - `node_groups`：节点与分组多对多关系。
 - `subscriptions`：上游 URL、目标分组、刷新状态。
 
@@ -47,6 +48,7 @@
 - `/api/auth/*`：登录、登出、当前用户。
 - `/api/state`：管理页一次性加载节点、分组、订阅与统计。
 - `/api/nodes`、`/api/groups`、`/api/subscriptions`：CRUD/导入。
+- `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
 - `/api/shares`：生成已签名 URL 与二维码地址。
 - `/s?...`：无需登录、验证签名后输出订阅或节点内容。
 
