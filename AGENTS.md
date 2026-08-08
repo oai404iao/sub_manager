@@ -189,6 +189,8 @@ Xray JSON / form payload
 
 - 页面状态由 `/api/state` 一次性加载；mutation 成功后通过 `onReload()` 重新拉取，
   不要同时维护第二套易失真的客户端缓存。
+- 分享历史按 `kind + target_id` 过滤，只在对应节点或分组的分享弹窗中展示；
+  不要增加全局分享历史页。
 - 领域操作主要集中在 `web/src/components/dashboard.tsx`。新增 Node 字段通常要同步：
   `web/src/lib/api.ts`、`blankNode`、`mergeNodeIntoXray`、表单控件和提交 payload。
 - `components.json` 指定 shadcn `base-nova`、Base UI、Lucide、`@/` alias。
