@@ -52,7 +52,9 @@
 
 - `/api/auth/*`：登录、登出、当前用户。
 - `/api/state`：管理页一次性加载节点、分组、订阅与统计。
-- `/api/nodes`、`/api/groups`、`/api/subscriptions`：CRUD/导入。
+- `/api/nodes`、`/api/subscriptions`：节点与订阅 CRUD；订阅刷新时原子替换其托管节点。
+- `/api/groups`：分组创建、删除与节点组织。
+- `/api/nodes/import`：解析 Xray/Mihomo YAML、JSON、URI 和 Base64 内容。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
 - `/api/shares`：生成已签名 URL 与二维码地址。
 - `/api/version`：无需鉴权的构建版本信息。

@@ -10,11 +10,11 @@ VLESS 与 SOCKS5，React 前端会被打包并嵌入 Go 单文件程序。
 
 - Cookie Session 登录鉴权（密码使用 bcrypt，Session 仅保存 SHA-256 摘要）
 - SQLite 持久化
-- VLESS / SOCKS5 分享链接、Xray JSON、Base64 订阅和 Mihomo YAML 导入
+- VLESS / SOCKS5 URI、Xray/Mihomo YAML、JSON 与多种 Base64 订阅导入
 - 对齐 Xray-core v26.7.28 的 VLESS Encryption、当前 transports、
   TLS/REALITY、XHTTP 分享参数与 UUIDv5 映射
 - Xray VLESS OutboundObject 无损保存、完整 JSON 编辑与下载
-- 节点、分组、订阅管理 API
+- 节点与订阅增删改、分组管理和订阅原子刷新 API
 - 带过期时间的 HMAC-SHA256 分享 URL
 - “订阅 URL”与“完整节点内容”两类二维码
 - shadcn/ui（Base UI）+ TypeScript + React + Vite 管理界面
@@ -63,7 +63,7 @@ docker run -d \
   -e SUBMAN_ADMIN_PASSWORD='replace-with-a-strong-password' \
   -e SUBMAN_SIGNING_KEY="$(openssl rand -hex 32)" \
   -e SUBMAN_BASE_URL='http://127.0.0.1:8080' \
-  ghcr.io/oai404iao/sub_manager:0.1.0
+  ghcr.io/oai404iao/sub_manager:0.1.1
 ```
 
 镜像默认以非 root 用户运行，监听 `0.0.0.0:8080`，数据库写入
@@ -87,7 +87,7 @@ docker compose -f compose.example.yaml ps
 如需固定镜像版本，可在 `.env` 中添加：
 
 ```dotenv
-SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.0
+SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.1
 ```
 
 ## 版本与发布

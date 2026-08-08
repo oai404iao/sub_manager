@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,7 +64,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/nodes/{id}/xray", s.exportXrayNode)
 	api.HandleFunc("DELETE /api/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/nodes/import", s.importNodes)
-	api.HandleFunc("POST /api/subscriptions", s.createSubscription)
+	api.HandleFunc("POST /api/subscriptions", s.saveSubscription)
+	api.HandleFunc("PUT /api/subscriptions/{id}", s.saveSubscription)
 	api.HandleFunc("POST /api/subscriptions/{id}/refresh", s.refreshSubscription)
 	api.HandleFunc("DELETE /api/subscriptions/{id}", s.deleteSubscription)
 	api.HandleFunc("POST /api/shares", s.createShare)
@@ -283,7 +285,7 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]int{"imported": count})
 }
 
-func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
+func (s *Server) saveSubscription(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Name    string `json:"name"`
 		URL     string `json:"url"`
@@ -293,19 +295,45 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.Name = strings.TrimSpace(request.Name)
+	request.URL = strings.TrimSpace(request.URL)
 	if request.Name == "" {
 		writeError(w, http.StatusBadRequest, "订阅名称不能为空")
 		return
 	}
-	if request.GroupID == 0 {
-		group, err := s.store.CreateGroup(r.Context(), request.Name, "由订阅自动创建")
-		if err != nil {
-			writeError(w, http.StatusBadRequest, friendlyDBError(err))
+	if _, err := parseSubscriptionURL(request.URL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var subscription model.Subscription
+	var err error
+	status := http.StatusCreated
+	if r.Method == http.MethodPut {
+		id, ok := pathID(w, r)
+		if !ok {
 			return
 		}
-		request.GroupID = group.ID
+		if request.GroupID < 1 {
+			writeError(w, http.StatusBadRequest, "编辑订阅时必须选择目标分组")
+			return
+		}
+		subscription, err = s.store.UpdateSubscription(r.Context(), id, request.Name, request.URL, request.GroupID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "订阅不存在")
+			return
+		}
+		status = http.StatusOK
+	} else {
+		if request.GroupID == 0 {
+			group, groupErr := s.store.CreateGroup(r.Context(), request.Name, "由订阅自动创建")
+			if groupErr != nil {
+				writeError(w, http.StatusBadRequest, friendlyDBError(groupErr))
+				return
+			}
+			request.GroupID = group.ID
+		}
+		subscription, err = s.store.CreateSubscription(r.Context(), request.Name, request.URL, request.GroupID)
 	}
-	subscription, err := s.store.CreateSubscription(r.Context(), request.Name, request.URL, request.GroupID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, friendlyDBError(err))
 		return
@@ -317,7 +345,8 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.UpdateSubscriptionStatus(r.Context(), subscription.ID, "ok", "")
-	writeJSON(w, http.StatusCreated, map[string]any{"subscription": subscription, "imported": count})
+	subscription, _ = s.store.Subscription(r.Context(), subscription.ID)
+	writeJSON(w, status, map[string]any{"subscription": subscription, "imported": count})
 }
 
 func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +394,7 @@ func (s *Server) syncSubscription(ctx context.Context, subscription model.Subscr
 		nodes[index].GroupIDs = []int64{subscription.GroupID}
 		nodes[index].SubscriptionID = &subscription.ID
 	}
-	return s.store.SaveNodes(ctx, nodes)
+	return s.store.ReplaceSubscriptionNodes(ctx, subscription.ID, subscription.GroupID, nodes)
 }
 
 func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
@@ -500,9 +529,9 @@ func shareMessage(kind string, id int64, content string, exp int64) string {
 }
 
 func (s *Server) fetchSubscription(ctx context.Context, rawURL string) (string, error) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
-		return "", errors.New("订阅 URL 必须是有效的 HTTP/HTTPS 地址")
+	parsed, err := parseSubscriptionURL(rawURL)
+	if err != nil {
+		return "", err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
@@ -523,6 +552,14 @@ func (s *Server) fetchSubscription(ctx context.Context, rawURL string) (string, 
 		return "", err
 	}
 	return string(content), nil
+}
+
+func parseSubscriptionURL(rawURL string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return nil, errors.New("订阅 URL 必须是有效的 HTTP/HTTPS 地址")
+	}
+	return parsed, nil
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

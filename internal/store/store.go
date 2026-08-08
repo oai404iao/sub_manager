@@ -380,6 +380,21 @@ INSERT INTO subscriptions(name, url, group_id) VALUES (?, ?, ?)`, name, rawURL, 
 	return s.Subscription(ctx, id)
 }
 
+func (s *Store) UpdateSubscription(ctx context.Context, id int64, name, rawURL string, groupID int64) (model.Subscription, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE subscriptions
+SET name = ?, url = ?, group_id = ?, last_status = 'pending', last_error = ''
+WHERE id = ?`, name, rawURL, groupID, id)
+	if err != nil {
+		return model.Subscription{}, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return model.Subscription{}, sql.ErrNoRows
+	}
+	return s.Subscription(ctx, id)
+}
+
 func (s *Store) Subscription(ctx context.Context, id int64) (model.Subscription, error) {
 	var item model.Subscription
 	var synced sql.NullTime
@@ -399,6 +414,52 @@ func (s *Store) UpdateSubscriptionStatus(ctx context.Context, id int64, status, 
 UPDATE subscriptions SET last_status=?, last_error=?, last_synced_at=CURRENT_TIMESTAMP WHERE id=?`,
 		status, message, id)
 	return err
+}
+
+func (s *Store) ReplaceSubscriptionNodes(
+	ctx context.Context,
+	subscriptionID int64,
+	groupID int64,
+	nodes []model.Node,
+) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE subscription_id = ?`, subscriptionID); err != nil {
+		return 0, err
+	}
+	for index := range nodes {
+		node := nodes[index]
+		node.ID = 0
+		node.SubscriptionID = &subscriptionID
+		node.GroupIDs = []int64{groupID}
+		data, err := json.Marshal(node)
+		if err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, `
+INSERT INTO nodes(name, protocol, server, port, config_json, subscription_id)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			node.Name, node.Protocol, node.Server, node.Port, string(data), subscriptionID)
+		if err != nil {
+			return 0, err
+		}
+		nodeID, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO node_groups(node_id, group_id) VALUES (?, ?)`, nodeID, groupID); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(nodes), nil
 }
 
 func (s *Store) DeleteSubscription(ctx context.Context, id int64) error {

@@ -101,6 +101,32 @@ func TestBase64Subscription(t *testing.T) {
 	}
 }
 
+func TestSubscriptionFixture(t *testing.T) {
+	content, err := os.ReadFile("testdata/subscription.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := ParseText(string(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("got %d nodes", len(nodes))
+	}
+}
+
+func TestURITextImport(t *testing.T) {
+	input := "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls#vless\r" +
+		"'socks5://user:pass@127.0.0.1:1080?udp=true#socks'"
+	nodes, err := ParseText(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes[0].Protocol != "vless" || nodes[1].Protocol != "socks5" {
+		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
 func TestMihomoYAML(t *testing.T) {
 	password := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	input := `
@@ -124,6 +150,90 @@ proxies:
 	}
 	if len(nodes) != 1 || nodes[0].Security != "reality" || nodes[0].PublicKey != password {
 		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
+func TestMihomoYAMLSequence(t *testing.T) {
+	input := `
+- name: yaml-vless
+  type: vless
+  server: example.com
+  port: 443
+  uuid: 11111111-1111-1111-1111-111111111111
+  tls: true
+  servername: example.com
+`
+	nodes, err := ParseText(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "yaml-vless" || nodes[0].Security != "tls" {
+		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
+func TestXrayYAML(t *testing.T) {
+	input := `
+protocol: vless
+tag: yaml-xray
+settings:
+  address: example.com
+  port: 443
+  id: 11111111-1111-1111-1111-111111111111
+  encryption: none
+streamSettings:
+  method: raw
+  security: tls
+  tlsSettings:
+    serverName: example.com
+`
+	nodes, err := ParseText(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "yaml-xray" || nodes[0].Network != "raw" {
+		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
+func TestYAMLURIList(t *testing.T) {
+	input := `
+nodes:
+  - "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls#vless"
+  - "socks5://user:pass@127.0.0.1:1080?udp=true#socks"
+`
+	nodes, err := ParseText(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes[0].Protocol != "vless" || nodes[1].Protocol != "socks5" {
+		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+}
+
+func TestBase64EncodedYAMLAndDataURI(t *testing.T) {
+	yamlInput := `
+proxies:
+  - name: encoded
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    username: user
+    password: pass
+`
+	for name, encoded := range map[string]string{
+		"url-safe": base64.RawURLEncoding.EncodeToString([]byte(yamlInput)),
+		"data-uri": "data:text/yaml;base64," + base64.StdEncoding.EncodeToString([]byte(yamlInput)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			nodes, err := ParseText(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(nodes) != 1 || nodes[0].Name != "encoded" || nodes[0].Protocol != "socks5" {
+				t.Fatalf("unexpected nodes: %#v", nodes)
+			}
+		})
 	}
 }
 
