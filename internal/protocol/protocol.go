@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -21,27 +22,42 @@ func ParseText(input string) ([]model.Node, error) {
 		return nil, errors.New("empty import content")
 	}
 
-	if nodes, recognized, err := ParseXrayJSON(input); recognized {
-		return nodes, err
+	candidates := []string{input}
+	if decoded, ok := decodeSubscription(input); ok && decoded != input {
+		candidates = append(candidates, decoded)
 	}
 
-	if nodes, ok, err := parseMihomoYAML(input); ok {
-		return nodes, err
-	}
-
-	content := decodeSubscription(input)
-	if content != input {
+	var parseErrors []string
+	for _, content := range candidates {
+		content = strings.TrimSpace(strings.TrimPrefix(content, "\uFEFF"))
 		if nodes, recognized, err := ParseXrayJSON(content); recognized {
 			return nodes, err
 		}
-		if nodes, ok, err := parseMihomoYAML(content); ok {
+		if nodes, recognized, err := parseYAML(content); recognized {
 			return nodes, err
 		}
+		nodes, errorsForContent := parseURIContent(content)
+		if len(nodes) > 0 {
+			return nodes, nil
+		}
+		for _, message := range errorsForContent {
+			if !containsString(parseErrors, message) {
+				parseErrors = append(parseErrors, message)
+			}
+		}
 	}
+	if len(parseErrors) > 0 {
+		return nil, fmt.Errorf("no supported nodes found: %s", strings.Join(parseErrors, "; "))
+	}
+	return nil, errors.New("no supported VLESS or SOCKS5 nodes found")
+}
+
+func parseURIContent(content string) ([]model.Node, []string) {
 	var nodes []model.Node
 	var parseErrors []string
-	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
+	content = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(content)
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := normalizeImportLine(rawLine)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -52,13 +68,25 @@ func ParseText(input string) ([]model.Node, error) {
 		}
 		nodes = append(nodes, node)
 	}
-	if len(nodes) == 0 {
-		if len(parseErrors) > 0 {
-			return nil, fmt.Errorf("no supported nodes found: %s", strings.Join(parseErrors, "; "))
-		}
-		return nil, errors.New("no supported VLESS or SOCKS5 nodes found")
+	return nodes, parseErrors
+}
+
+func normalizeImportLine(line string) string {
+	line = strings.TrimSpace(strings.TrimPrefix(line, "\uFEFF"))
+	if strings.HasPrefix(line, "- ") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
 	}
-	return nodes, nil
+	if len(line) >= 2 {
+		switch {
+		case line[0] == '"' && line[len(line)-1] == '"':
+			if unquoted, err := strconv.Unquote(line); err == nil {
+				line = unquoted
+			}
+		case line[0] == '\'' && line[len(line)-1] == '\'':
+			line = strings.ReplaceAll(line[1:len(line)-1], "''", "'")
+		}
+	}
+	return strings.TrimSpace(line)
 }
 
 func ParseURI(raw string) (model.Node, error) {
@@ -413,16 +441,49 @@ func Validate(node model.Node) error {
 	return nil
 }
 
-func parseMihomoYAML(input string) ([]model.Node, bool, error) {
-	var document struct {
-		Proxies []map[string]any `yaml:"proxies"`
-	}
-	if yaml.Unmarshal([]byte(input), &document) != nil || len(document.Proxies) == 0 {
+func parseYAML(input string) ([]model.Node, bool, error) {
+	var document any
+	if err := yaml.Unmarshal([]byte(input), &document); err != nil {
 		return nil, false, nil
 	}
-	nodes := make([]model.Node, 0, len(document.Proxies))
+	document = normalizeYAML(document)
+	switch document.(type) {
+	case map[string]any, []any:
+	default:
+		return nil, false, nil
+	}
+
+	if content, recognized := yamlURIContent(document); recognized {
+		nodes, parseErrors := parseURIContent(content)
+		if len(nodes) > 0 {
+			return nodes, true, nil
+		}
+		if len(parseErrors) > 0 {
+			return nil, true, fmt.Errorf("invalid YAML node URIs: %s", strings.Join(parseErrors, "; "))
+		}
+		return nil, true, errors.New("YAML node URI list is empty")
+	}
+
+	if looksLikeXrayDocument(document) {
+		data, err := json.Marshal(document)
+		if err != nil {
+			return nil, true, fmt.Errorf("encode Xray YAML: %w", err)
+		}
+		nodes, recognized, err := ParseXrayJSON(string(data))
+		if recognized {
+			return nodes, true, err
+		}
+	}
+	if proxies, recognized := mihomoProxyMaps(document); recognized {
+		return parseMihomoProxies(proxies)
+	}
+	return nil, false, nil
+}
+
+func parseMihomoProxies(proxies []map[string]any) ([]model.Node, bool, error) {
+	nodes := make([]model.Node, 0, len(proxies))
 	var validationErrors []string
-	for _, proxy := range document.Proxies {
+	for _, proxy := range proxies {
 		kind := lowerString(proxy["type"])
 		switch kind {
 		case "vless":
@@ -504,25 +565,188 @@ func parseMihomoYAML(input string) ([]model.Node, bool, error) {
 	return nodes, true, nil
 }
 
-func decodeSubscription(input string) string {
-	if strings.Contains(input, "://") {
-		return input
+func normalizeYAML(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(value))
+		for key, item := range value {
+			result[key] = normalizeYAML(item)
+		}
+		return result
+	case map[any]any:
+		result := make(map[string]any, len(value))
+		for key, item := range value {
+			result[fmt.Sprint(key)] = normalizeYAML(item)
+		}
+		return result
+	case []any:
+		result := make([]any, len(value))
+		for index, item := range value {
+			result[index] = normalizeYAML(item)
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func yamlURIContent(document any) (string, bool) {
+	var values []string
+	switch document := document.(type) {
+	case []any:
+		values = appendYAMLStrings(values, document)
+	case map[string]any:
+		for _, key := range []string{"nodes", "uris", "links", "proxies"} {
+			value, ok := document[key]
+			if !ok {
+				continue
+			}
+			switch value := value.(type) {
+			case string:
+				values = append(values, value)
+			case []any:
+				values = appendYAMLStrings(values, value)
+			case map[string]any:
+				for _, item := range value {
+					if text, ok := item.(string); ok {
+						values = append(values, text)
+					}
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		return "", false
+	}
+	return strings.Join(values, "\n"), true
+}
+
+func appendYAMLStrings(target []string, values []any) []string {
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			target = append(target, text)
+		}
+	}
+	return target
+}
+
+func mihomoProxyMaps(document any) ([]map[string]any, bool) {
+	var values []any
+	containerRecognized := false
+	switch document := document.(type) {
+	case map[string]any:
+		if proxyValues, ok := document["proxies"].([]any); ok {
+			values = proxyValues
+			containerRecognized = true
+		} else if _, hasType := document["type"]; hasType {
+			values = []any{document}
+			containerRecognized = true
+		} else {
+			return nil, false
+		}
+	case []any:
+		values = document
+	default:
+		return nil, false
+	}
+
+	proxies := make([]map[string]any, 0, len(values))
+	recognized := false
+	for _, value := range values {
+		proxy, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasType := proxy["type"]; hasType {
+			recognized = true
+		}
+		proxies = append(proxies, proxy)
+	}
+	if len(proxies) == 0 {
+		return nil, containerRecognized
+	}
+	return proxies, containerRecognized || recognized
+}
+
+func looksLikeXrayDocument(document any) bool {
+	switch document := document.(type) {
+	case map[string]any:
+		_, hasOutbounds := document["outbounds"]
+		_, hasProtocol := document["protocol"]
+		return hasOutbounds || hasProtocol
+	case []any:
+		for _, value := range document {
+			if outbound, ok := value.(map[string]any); ok {
+				if _, hasProtocol := outbound["protocol"]; hasProtocol {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func decodeSubscription(input string) (string, bool) {
+	payload := strings.TrimSpace(input)
+	lower := strings.ToLower(payload)
+	switch {
+	case strings.HasPrefix(lower, "data:"):
+		comma := strings.IndexByte(payload, ',')
+		if comma < 0 || !strings.Contains(strings.ToLower(payload[:comma]), ";base64") {
+			return input, false
+		}
+		payload = payload[comma+1:]
+	case strings.HasPrefix(lower, "base64://"):
+		payload = payload[len("base64://"):]
+	case strings.Contains(payload, "://"):
+		return input, false
 	}
 	compact := strings.Map(func(r rune) rune {
 		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
 			return -1
 		}
 		return r
-	}, input)
+	}, payload)
 	encodings := []*base64.Encoding{
 		base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
 	}
 	for _, encoding := range encodings {
-		if decoded, err := encoding.DecodeString(compact); err == nil {
-			return string(decoded)
+		if decoded, err := encoding.DecodeString(compact); err == nil && utf8.Valid(decoded) {
+			content := strings.TrimSpace(strings.TrimPrefix(string(decoded), "\uFEFF"))
+			if looksLikeImportContent(content) {
+				return content, true
+			}
 		}
 	}
-	return input
+	return input, false
+}
+
+func looksLikeImportContent(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "vless://") ||
+		strings.Contains(lower, "socks://") ||
+		strings.Contains(lower, "socks5://") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "-") {
+		return true
+	}
+	for _, marker := range []string{"proxies:", "outbounds:", "nodes:", "uris:", "links:"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func extras(values url.Values, known map[string]bool) map[string]string {

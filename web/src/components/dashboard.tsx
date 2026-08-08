@@ -8,6 +8,7 @@ import {
   LinkIcon,
   LogOutIcon,
   MoreHorizontalIcon,
+  PencilIcon,
   PlusIcon,
   QrCodeIcon,
   RefreshCwIcon,
@@ -264,13 +265,19 @@ function setText(
 }
 
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
+  const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">(
+    "nodes",
+  )
   const [groupFilter, setGroupFilter] = useState(0)
   const [error, setError] = useState("")
   const [groupOpen, setGroupOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [nodeOpen, setNodeOpen] = useState(false)
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
   const [editingNode, setEditingNode] = useState<Node>(blankNode)
+  const [editingSubscription, setEditingSubscription] =
+    useState<Subscription | null>(null)
   const [shareTarget, setShareTarget] = useState<{
     kind: "node" | "group"
     id: number
@@ -301,6 +308,16 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       group_ids: groupFilter ? [groupFilter] : [],
     })
     setNodeOpen(true)
+  }
+
+  function openNewSubscription() {
+    setEditingSubscription(null)
+    setSubscriptionOpen(true)
+  }
+
+  function openEditSubscription(subscription: Subscription) {
+    setEditingSubscription(subscription)
+    setSubscriptionOpen(true)
   }
 
   function openShare(kind: "node" | "group", id: number, name: string) {
@@ -438,7 +455,12 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           ) : null}
-          <Tabs defaultValue="nodes">
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) =>
+              setActiveTab(value as "nodes" | "subscriptions")
+            }
+          >
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <TabsList>
                 <TabsTrigger value="nodes">节点</TabsTrigger>
@@ -449,10 +471,17 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                   <FileInputIcon data-icon="inline-start" />
                   导入
                 </Button>
-                <Button onClick={openNewNode}>
-                  <PlusIcon data-icon="inline-start" />
-                  新建节点
-                </Button>
+                {activeTab === "nodes" ? (
+                  <Button onClick={openNewNode}>
+                    <PlusIcon data-icon="inline-start" />
+                    新建节点
+                  </Button>
+                ) : (
+                  <Button onClick={openNewSubscription}>
+                    <PlusIcon data-icon="inline-start" />
+                    新建订阅
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -492,6 +521,8 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                     }),
                   )
                 }
+                onEdit={openEditSubscription}
+                onCreate={openNewSubscription}
                 onImport={() => setImportOpen(true)}
               />
             </TabsContent>
@@ -516,6 +547,14 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
         node={editingNode}
         groups={state.groups}
         onOpenChange={setNodeOpen}
+        onSaved={() => onReload()}
+      />
+      <SubscriptionDialog
+        key={`${editingSubscription?.id ?? 0}-${subscriptionOpen}`}
+        open={subscriptionOpen}
+        subscription={editingSubscription}
+        groups={state.groups}
+        onOpenChange={setSubscriptionOpen}
         onSaved={() => onReload()}
       />
       <ShareDialog
@@ -624,6 +663,10 @@ function NodeTable({
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
                       <DropdownMenuGroup>
+                        <DropdownMenuItem onClick={() => onEdit(node)}>
+                          <PencilIcon />
+                          编辑
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => onShare(node)}>
                           <Share2Icon />
                           分享
@@ -653,12 +696,16 @@ function SubscriptionList({
   groups,
   onRefresh,
   onDelete,
+  onEdit,
+  onCreate,
   onImport,
 }: {
   subscriptions: Subscription[]
   groups: Group[]
   onRefresh: (item: Subscription) => void
   onDelete: (item: Subscription) => void
+  onEdit: (item: Subscription) => void
+  onCreate: () => void
   onImport: () => void
 }) {
   if (subscriptions.length === 0) {
@@ -675,8 +722,15 @@ function SubscriptionList({
                 添加 HTTP/HTTPS 订阅并解析为分组与节点。
               </EmptyDescription>
             </EmptyHeader>
-            <EmptyContent>
-              <Button onClick={onImport}>添加订阅</Button>
+            <EmptyContent className="flex flex-wrap gap-2">
+              <Button onClick={onCreate}>
+                <PlusIcon data-icon="inline-start" />
+                新建订阅
+              </Button>
+              <Button variant="outline" onClick={onImport}>
+                <FileInputIcon data-icon="inline-start" />
+                导入内容
+              </Button>
             </EmptyContent>
           </Empty>
         </CardContent>
@@ -713,7 +767,15 @@ function SubscriptionList({
                 <AlertDescription>{item.last_error}</AlertDescription>
               </Alert>
             ) : null}
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onEdit(item)}
+              >
+                <PencilIcon data-icon="inline-start" />
+                编辑
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -867,13 +929,13 @@ function ImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="max-h-[90svh] overflow-x-hidden overflow-y-auto sm:max-w-xl">
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>导入节点或订阅</DialogTitle>
             <DialogDescription>
-              支持 VLESS/SOCKS5 链接、Xray JSON、Base64 订阅和 Mihomo
-              YAML。
+              支持 Mihomo/Xray YAML、VLESS/SOCKS5 URI，以及标准或
+              URL-safe Base64 订阅。
             </DialogDescription>
           </DialogHeader>
           <Tabs
@@ -888,14 +950,23 @@ function ImportDialog({
             </TabsList>
             <TabsContent value="raw" className="mt-4">
               <Field>
-                <FieldLabel htmlFor="import-content">节点内容</FieldLabel>
+                <FieldLabel htmlFor="import-content">
+                  节点内容（YAML / URI / Base64）
+                </FieldLabel>
                 <Textarea
                   id="import-content"
-                  className="min-h-40 font-mono text-xs"
-                  placeholder="vless://...&#10;socks5://..."
+                  className="min-h-48 max-h-[50svh] resize-y font-mono text-xs"
+                  placeholder={"vless://...\nsocks5://...\n\n或粘贴 YAML / Base64 订阅"}
+                  required
+                  spellCheck={false}
+                  wrap="soft"
                   value={content}
                   onChange={(event) => setContent(event.target.value)}
                 />
+                <FieldDescription>
+                  可粘贴单条或多条 URI、Mihomo/Xray YAML、YAML URI
+                  列表，以及带换行或 data URI 前缀的 Base64。
+                </FieldDescription>
               </Field>
             </TabsContent>
             <TabsContent value="subscription" className="mt-4">
@@ -904,6 +975,7 @@ function ImportDialog({
                   <FieldLabel htmlFor="subscription-name">订阅名称</FieldLabel>
                   <Input
                     id="subscription-name"
+                    required
                     value={name}
                     onChange={(event) => setName(event.target.value)}
                   />
@@ -915,6 +987,7 @@ function ImportDialog({
                   <Input
                     id="subscription-url"
                     type="url"
+                    required
                     placeholder="https://example.com/subscription"
                     value={subscriptionURL}
                     onChange={(event) =>
@@ -961,6 +1034,142 @@ function ImportDialog({
           ) : null}
           <DialogFooter>
             <Button type="submit">开始导入</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SubscriptionDialog({
+  open,
+  subscription,
+  groups,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean
+  subscription: Subscription | null
+  groups: Group[]
+  onOpenChange: (open: boolean) => void
+  onSaved: () => Promise<void>
+}) {
+  const [name, setName] = useState(subscription?.name ?? "")
+  const [subscriptionURL, setSubscriptionURL] = useState(
+    subscription?.url ?? "",
+  )
+  const [groupID, setGroupID] = useState(subscription?.group_id ?? 0)
+  const [error, setError] = useState("")
+  const groupItems = [
+    ...(subscription
+      ? []
+      : [{ label: "按订阅名称自动创建分组", value: "0" }]),
+    ...groups.map((group) => ({
+      label: group.name,
+      value: String(group.id),
+    })),
+  ]
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setError("")
+    try {
+      await api(
+        subscription
+          ? `/api/subscriptions/${subscription.id}`
+          : "/api/subscriptions",
+        {
+          method: subscription ? "PUT" : "POST",
+          body: JSON.stringify({
+            name,
+            url: subscriptionURL,
+            group_id: groupID,
+          }),
+        },
+      )
+      onOpenChange(false)
+      await onSaved()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "保存订阅失败")
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90svh] overflow-x-hidden overflow-y-auto sm:max-w-xl">
+        <form className="flex flex-col gap-4" onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>
+              {subscription ? "编辑订阅" : "新建订阅"}
+            </DialogTitle>
+            <DialogDescription>
+              保存后会立即拉取订阅，并替换该订阅上一次同步的节点。
+            </DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="managed-subscription-name">
+                订阅名称
+              </FieldLabel>
+              <Input
+                id="managed-subscription-name"
+                required
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="managed-subscription-url">
+                订阅 URL
+              </FieldLabel>
+              <Input
+                id="managed-subscription-url"
+                type="url"
+                required
+                placeholder="https://example.com/subscription"
+                value={subscriptionURL}
+                onChange={(event) => setSubscriptionURL(event.target.value)}
+              />
+              <FieldDescription>
+                为防 SSRF，服务端拒绝私网和保留地址。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel>目标分组</FieldLabel>
+              <Select
+                items={groupItems}
+                value={String(groupID)}
+                onValueChange={(value) => setGroupID(Number(value))}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false}>
+                  <SelectGroup>
+                    {groupItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              {!subscription && groupID === 0 ? (
+                <FieldDescription>
+                  未指定时会以订阅名称自动创建分组。
+                </FieldDescription>
+              ) : null}
+            </Field>
+          </FieldGroup>
+          {error ? (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          ) : null}
+          <DialogFooter>
+            <Button type="submit">
+              {subscription ? "保存并同步" : "创建并同步"}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
