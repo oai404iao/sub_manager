@@ -49,16 +49,18 @@
   `xray_outbound`，用于无损往返当前 Xray 配置。
 - `node_groups`：节点与分组多对多关系。
 - `subscriptions`：上游 URL、目标分组、刷新状态。
+- `shares`：节点/分组分享历史、目标名称快照、签名 URL 与可选到期时间。
 
 ## API 边界
 
 - `/api/auth/*`：登录、登出、当前用户。
-- `/api/state`：管理页一次性加载节点、分组、订阅与统计。
+- `/api/state`：管理页一次性加载节点、分组、订阅、分享历史与统计。
 - `/api/nodes`、`/api/subscriptions`：节点与订阅 CRUD；订阅刷新时原子替换其托管节点。
 - `/api/groups`：分组创建、删除与节点组织。
 - `/api/nodes/import`：解析 Xray/Mihomo YAML、JSON、URI 和 Base64 内容。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
-- `/api/shares`：生成已签名 URL 与二维码地址。
+- `/api/shares`：生成并记录单一签名订阅 URL；支持限时与永久分享。分组仅返回
+  URL 二维码，单节点额外返回节点 URI 二维码。
 - `/api/version`：无需鉴权的构建版本信息。
 - `/healthz`：无需鉴权的容器健康检查。
 - `/s?...`：无需登录、验证签名后输出订阅或节点内容。

@@ -112,3 +112,54 @@ func TestSubscriptionCRUDAndNodeReplacement(t *testing.T) {
 		t.Fatalf("deleting a subscription should remove managed nodes: %#v", nodes)
 	}
 }
+
+func TestShareHistory(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	expiresAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+
+	temporary, err := database.CreateShare(ctx, model.Share{
+		Kind:       "node",
+		TargetID:   1,
+		TargetName: "temporary",
+		URL:        "https://share.example/s?temporary",
+		ExpiresAt:  &expiresAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	permanent, err := database.CreateShare(ctx, model.Share{
+		Kind:       "group",
+		TargetID:   2,
+		TargetName: "permanent",
+		URL:        "https://share.example/s?permanent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if temporary.Permanent || temporary.ExpiresAt == nil ||
+		temporary.ExpiresAt.Unix() != expiresAt.Unix() {
+		t.Fatalf("unexpected temporary share: %#v", temporary)
+	}
+	if !permanent.Permanent || permanent.ExpiresAt != nil {
+		t.Fatalf("unexpected permanent share: %#v", permanent)
+	}
+
+	state, err := database.State(ctx, model.User{ID: 1, Username: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Shares) != 2 {
+		t.Fatalf("share count = %d, want 2", len(state.Shares))
+	}
+	if state.Shares[0].ID != permanent.ID || state.Shares[1].ID != temporary.ID {
+		t.Fatalf("shares are not newest first: %#v", state.Shares)
+	}
+}

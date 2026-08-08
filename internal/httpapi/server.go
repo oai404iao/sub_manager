@@ -153,11 +153,21 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	nodesByID := make(map[int64]model.Node, len(state.Nodes))
 	for index := range state.Nodes {
 		// Keep legacy/invalid nodes visible so administrators can repair them.
 		if protocol.EnsureXrayOutbound(&state.Nodes[index]) == nil {
 			_ = protocol.ApplyXrayOutbound(&state.Nodes[index])
 		}
+		nodesByID[state.Nodes[index].ID] = state.Nodes[index]
+	}
+	for index := range state.Shares {
+		var nodes []model.Node
+		if node, ok := nodesByID[state.Shares[index].TargetID]; ok &&
+			state.Shares[index].Kind == "node" {
+			nodes = []model.Node{node}
+		}
+		decorateShare(&state.Shares[index], nodes)
 	}
 	writeJSON(w, http.StatusOK, state)
 }
@@ -402,6 +412,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		Kind         string `json:"kind"`
 		ID           int64  `json:"id"`
 		ExpiresHours int    `json:"expires_hours"`
+		Permanent    bool   `json:"permanent"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -421,21 +432,41 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "没有可分享的节点")
 		return
 	}
-	exp := time.Now().Add(time.Duration(request.ExpiresHours) * time.Hour).Unix()
-	subscriptionURL := s.signedURL(request.Kind, request.ID, "subscription", exp)
-	nodesURL := s.signedURL(request.Kind, request.ID, "nodes", exp)
-	fullContent, err := protocol.FullContent(nodes)
+	if _, err := protocol.Subscription(nodes); err != nil {
+		serverError(w, err)
+		return
+	}
+
+	targetName := nodes[0].Name
+	if request.Kind == "group" {
+		group, groupErr := s.store.Group(r.Context(), request.ID)
+		if groupErr != nil {
+			writeError(w, http.StatusNotFound, "分组不存在")
+			return
+		}
+		targetName = group.Name
+	}
+
+	var expiresAt *time.Time
+	var exp int64
+	if !request.Permanent {
+		expires := time.Now().Add(time.Duration(request.ExpiresHours) * time.Hour).UTC()
+		expiresAt = &expires
+		exp = expires.Unix()
+	}
+	item, err := s.store.CreateShare(r.Context(), model.Share{
+		Kind:       request.Kind,
+		TargetID:   request.ID,
+		TargetName: targetName,
+		URL:        s.signedURL(request.Kind, request.ID, "subscription", exp),
+		ExpiresAt:  expiresAt,
+	})
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"subscription_url":    subscriptionURL,
-		"nodes_url":           nodesURL,
-		"qr_subscription_url": "/api/qr?data=" + url.QueryEscape(subscriptionURL),
-		"qr_nodes_url":        "/api/qr?data=" + url.QueryEscape(fullContent),
-		"expires_at":          time.Unix(exp, 0).UTC(),
-	})
+	decorateShare(&item, nodes)
+	writeJSON(w, http.StatusCreated, item)
 }
 
 func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
@@ -448,7 +479,7 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exp, err := strconv.ParseInt(query.Get("exp"), 10, 64)
-	if err != nil || time.Now().Unix() > exp {
+	if err != nil || exp < 0 || (exp > 0 && time.Now().Unix() > exp) {
 		writeError(w, http.StatusGone, "share URL expired")
 		return
 	}
@@ -510,6 +541,22 @@ func (s *Server) shareNodes(ctx context.Context, kind string, id int64) ([]model
 	default:
 		return nil, errors.New("invalid share kind")
 	}
+}
+
+func decorateShare(item *model.Share, nodes []model.Node) {
+	item.QRURL = qrURL(item.URL)
+	item.Expired = item.ExpiresAt != nil && time.Now().Unix() > item.ExpiresAt.Unix()
+	if item.Kind != "node" || len(nodes) != 1 {
+		return
+	}
+	uri, err := protocol.URI(nodes[0])
+	if err == nil {
+		item.QRURIURL = qrURL(uri)
+	}
+}
+
+func qrURL(data string) string {
+	return "/api/qr?data=" + url.QueryEscape(data)
 }
 
 func (s *Server) signedURL(kind string, id int64, content string, exp int64) string {

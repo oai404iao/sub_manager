@@ -71,9 +71,24 @@ type Subscription struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+type Share struct {
+	ID         int64      `json:"id"`
+	Kind       string     `json:"kind"`
+	TargetID   int64      `json:"target_id"`
+	TargetName string     `json:"target_name"`
+	URL        string     `json:"url"`
+	QRURL      string     `json:"qr_url,omitempty"`
+	QRURIURL   string     `json:"qr_uri_url,omitempty"`
+	Permanent  bool       `json:"permanent"`
+	Expired    bool       `json:"expired"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
 type State struct {
 	User          User           `json:"user"`
 	Groups        []Group        `json:"groups"`
 	Nodes         []Node         `json:"nodes"`
 	Subscriptions []Subscription `json:"subscriptions"`
+	Shares        []Share        `json:"shares"`
 }

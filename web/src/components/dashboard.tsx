@@ -4,6 +4,7 @@ import {
   CopyIcon,
   DownloadIcon,
   FileInputIcon,
+  HistoryIcon,
   LinkIcon,
   LogOutIcon,
   MoreHorizontalIcon,
@@ -85,7 +86,7 @@ import {
   api,
   type Group,
   type Node,
-  type ShareResult,
+  type Share,
   type State,
   type Subscription,
 } from "@/lib/api"
@@ -127,6 +128,10 @@ const xhttpModeItems = ["auto", "packet-up", "stream-up", "stream-one"].map(
 const grpcModeItems = [
   { label: "gun（默认）", value: "gun" },
   { label: "multi", value: "multi" },
+]
+const shareModeItems = [
+  { label: "限时分享", value: "temporary" },
+  { label: "永久分享", value: "permanent" },
 ]
 
 const blankNode: Node = {
@@ -265,9 +270,9 @@ function setText(
 }
 
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
-  const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">(
-    "nodes",
-  )
+  const [activeTab, setActiveTab] = useState<
+    "nodes" | "subscriptions" | "shares"
+  >("nodes")
   const [groupFilter, setGroupFilter] = useState(0)
   const [error, setError] = useState("")
   const [groupOpen, setGroupOpen] = useState(false)
@@ -283,6 +288,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
     id: number
     name: string
   } | null>(null)
+  const [selectedShare, setSelectedShare] = useState<Share | null>(null)
 
   const visibleNodes = useMemo(
     () =>
@@ -321,7 +327,14 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   }
 
   function openShare(kind: "node" | "group", id: number, name: string) {
+    setSelectedShare(null)
     setShareTarget({ kind, id, name })
+    setShareOpen(true)
+  }
+
+  function openShareHistory(share: Share) {
+    setShareTarget(null)
+    setSelectedShare(share)
     setShareOpen(true)
   }
 
@@ -425,7 +438,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
             <CardHeader>
               <CardTitle>概览</CardTitle>
             </CardHeader>
-            <CardContent className="grid grid-cols-2 gap-3 text-sm lg:grid-cols-1">
+            <CardContent className="grid grid-cols-3 gap-3 text-sm lg:grid-cols-1">
               <div>
                 <p className="text-muted-foreground">节点</p>
                 <p className="text-2xl font-medium">{state.nodes.length}</p>
@@ -435,6 +448,10 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                 <p className="text-2xl font-medium">
                   {state.subscriptions.length}
                 </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">分享</p>
+                <p className="text-2xl font-medium">{state.shares.length}</p>
               </div>
             </CardContent>
           </Card>
@@ -450,31 +467,34 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
           <Tabs
             value={activeTab}
             onValueChange={(value) =>
-              setActiveTab(value as "nodes" | "subscriptions")
+              setActiveTab(value as "nodes" | "subscriptions" | "shares")
             }
           >
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <TabsList>
                 <TabsTrigger value="nodes">节点</TabsTrigger>
                 <TabsTrigger value="subscriptions">订阅</TabsTrigger>
+                <TabsTrigger value="shares">分享历史</TabsTrigger>
               </TabsList>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setImportOpen(true)}>
-                  <FileInputIcon data-icon="inline-start" />
-                  导入
-                </Button>
-                {activeTab === "nodes" ? (
-                  <Button onClick={openNewNode}>
-                    <PlusIcon data-icon="inline-start" />
-                    新建节点
+              {activeTab !== "shares" ? (
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setImportOpen(true)}>
+                    <FileInputIcon data-icon="inline-start" />
+                    导入
                   </Button>
-                ) : (
-                  <Button onClick={openNewSubscription}>
-                    <PlusIcon data-icon="inline-start" />
-                    新建订阅
-                  </Button>
-                )}
-              </div>
+                  {activeTab === "nodes" ? (
+                    <Button onClick={openNewNode}>
+                      <PlusIcon data-icon="inline-start" />
+                      新建节点
+                    </Button>
+                  ) : (
+                    <Button onClick={openNewSubscription}>
+                      <PlusIcon data-icon="inline-start" />
+                      新建订阅
+                    </Button>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <TabsContent value="nodes" className="mt-4">
@@ -518,6 +538,13 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                 onImport={() => setImportOpen(true)}
               />
             </TabsContent>
+
+            <TabsContent value="shares" className="mt-4">
+              <ShareHistory
+                shares={state.shares}
+                onView={openShareHistory}
+              />
+            </TabsContent>
           </Tabs>
         </section>
       </main>
@@ -550,9 +577,16 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
         onSaved={() => onReload()}
       />
       <ShareDialog
+        key={
+          selectedShare
+            ? `history-${selectedShare.id}`
+            : `create-${shareTarget?.kind ?? "none"}-${shareTarget?.id ?? 0}`
+        }
         open={shareOpen}
         target={shareTarget}
+        initialResult={selectedShare}
         onOpenChange={setShareOpen}
+        onGenerated={onReload}
       />
     </div>
   )
@@ -790,6 +824,127 @@ function SubscriptionList({
       ))}
     </div>
   )
+}
+
+function ShareHistory({
+  shares,
+  onView,
+}: {
+  shares: Share[]
+  onView: (share: Share) => void
+}) {
+  async function copyURL(value: string) {
+    await navigator.clipboard.writeText(value)
+  }
+
+  if (shares.length === 0) {
+    return (
+      <Card>
+        <CardContent>
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <HistoryIcon />
+              </EmptyMedia>
+              <EmptyTitle>还没有分享记录</EmptyTitle>
+              <EmptyDescription>
+                从节点或分组菜单生成分享后，会在这里保留历史。
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>分享历史</CardTitle>
+        <CardDescription>
+          查看已生成的节点与分组分享，包括永久分享。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>分享对象</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>创建时间</TableHead>
+              <TableHead>有效期</TableHead>
+              <TableHead className="w-28">
+                <span className="sr-only">操作</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {shares.map((share) => (
+              <TableRow key={share.id}>
+                <TableCell className="max-w-80">
+                  <p className="font-medium">{share.target_name}</p>
+                  <p className="truncate font-mono text-xs text-muted-foreground">
+                    {share.url}
+                  </p>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline">
+                    {share.kind === "node" ? "节点" : "分组"}
+                  </Badge>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                  {formatShareTime(share.created_at)}
+                </TableCell>
+                <TableCell>
+                  <Badge
+                    variant={
+                      share.expired
+                        ? "destructive"
+                        : share.permanent
+                          ? "secondary"
+                          : "outline"
+                    }
+                  >
+                    {share.expired
+                      ? "已过期"
+                      : share.permanent
+                        ? "永久"
+                        : formatShareTime(share.expires_at ?? "")}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => copyURL(share.url)}
+                    >
+                      <CopyIcon />
+                      <span className="sr-only">复制分享 URL</span>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => onView(share)}
+                    >
+                      <QrCodeIcon />
+                      <span className="sr-only">查看分享详情</span>
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  )
+}
+
+function formatShareTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString("zh-CN", { hour12: false })
 }
 
 function GroupDialog({
@@ -1884,29 +2039,39 @@ function NodeDialog({
 function ShareDialog({
   open,
   target,
+  initialResult,
   onOpenChange,
+  onGenerated,
 }: {
   open: boolean
   target: { kind: "node" | "group"; id: number; name: string } | null
+  initialResult: Share | null
   onOpenChange: (open: boolean) => void
+  onGenerated: () => Promise<void>
 }) {
+  const [shareMode, setShareMode] = useState<"temporary" | "permanent">(
+    "temporary",
+  )
   const [expiresHours, setExpiresHours] = useState(720)
-  const [result, setResult] = useState<ShareResult | null>(null)
+  const [result, setResult] = useState<Share | null>(initialResult)
   const [error, setError] = useState("")
 
   async function generate() {
     if (!target) return
     setError("")
     try {
-      const share = await api<ShareResult>("/api/shares", {
+      const permanent = shareMode === "permanent"
+      const share = await api<Share>("/api/shares", {
         method: "POST",
         body: JSON.stringify({
           kind: target.kind,
           id: target.id,
-          expires_hours: expiresHours,
+          expires_hours: permanent ? 0 : expiresHours,
+          permanent,
         }),
       })
       setResult(share)
+      await onGenerated()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "生成失败")
     }
@@ -1922,78 +2087,125 @@ function ShareDialog({
       onOpenChange={(next) => {
         onOpenChange(next)
         if (!next) {
-          setResult(null)
+          setShareMode("temporary")
+          setExpiresHours(720)
+          setResult(initialResult)
           setError("")
         }
       }}
     >
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>分享 {target?.name}</DialogTitle>
+          <DialogTitle>
+            {result ? "分享详情" : `分享 ${target?.name ?? ""}`}
+          </DialogTitle>
           <DialogDescription>
-            URL 参数包含到期时间，并使用 HMAC-SHA256 防篡改。
+            分享 URL 使用 HMAC-SHA256 防篡改，并保存在分享历史中。
           </DialogDescription>
         </DialogHeader>
-        <Field>
-          <FieldLabel htmlFor="share-hours">有效小时数</FieldLabel>
-          <Input
-            id="share-hours"
-            type="number"
-            min={1}
-            max={8760}
-            value={expiresHours}
-            onChange={(event) => setExpiresHours(Number(event.target.value))}
-          />
-        </Field>
         {!result ? (
-          <Button onClick={generate}>
-            <Share2Icon data-icon="inline-start" />
-            生成分享
-          </Button>
+          <FieldGroup>
+            <Field>
+              <FieldLabel>分享类型</FieldLabel>
+              <Select
+                items={shareModeItems}
+                value={shareMode}
+                onValueChange={(value) => {
+                  if (value === "temporary" || value === "permanent") {
+                    setShareMode(value)
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false}>
+                  <SelectGroup>
+                    {shareModeItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                永久分享不会自动过期；修改签名密钥仍会使链接失效。
+              </FieldDescription>
+            </Field>
+            {shareMode === "temporary" ? (
+              <Field>
+                <FieldLabel htmlFor="share-hours">有效小时数</FieldLabel>
+                <Input
+                  id="share-hours"
+                  type="number"
+                  min={1}
+                  max={8760}
+                  value={expiresHours}
+                  onChange={(event) =>
+                    setExpiresHours(Number(event.target.value))
+                  }
+                />
+              </Field>
+            ) : null}
+            <Button onClick={generate}>
+              <Share2Icon data-icon="inline-start" />
+              生成分享
+            </Button>
+          </FieldGroup>
         ) : (
           <div className="flex flex-col gap-5">
-            <ShareURL
-              label="订阅 URL"
-              value={result.subscription_url}
-              onCopy={copy}
-            />
-            <ShareURL
-              label="节点内容 URL"
-              value={result.nodes_url}
-              onCopy={copy}
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">
+                {result.kind === "node" ? "节点" : "分组"}
+              </Badge>
+              <Badge variant={result.permanent ? "secondary" : "outline"}>
+                {result.expired
+                  ? "已过期"
+                  : result.permanent
+                    ? "永久有效"
+                    : `有效至 ${formatShareTime(result.expires_at ?? "")}`}
+              </Badge>
+              <span className="text-sm text-muted-foreground">
+                {result.target_name} · 创建于{" "}
+                {formatShareTime(result.created_at)}
+              </span>
+            </div>
+            <ShareURL label="分享 URL" value={result.url} onCopy={copy} />
             <Separator />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Card>
+            <div className="flex flex-wrap gap-4">
+              <Card className="min-w-64 flex-1">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <QrCodeIcon />
-                    订阅 URL 二维码
+                    分享 URL 二维码
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <img
                     className="mx-auto aspect-square w-full max-w-64 rounded-lg"
-                    src={result.qr_subscription_url}
-                    alt="订阅 URL 二维码"
+                    src={result.qr_url}
+                    alt="分享 URL 二维码"
                   />
                 </CardContent>
               </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <QrCodeIcon />
-                    完整节点二维码
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <img
-                    className="mx-auto aspect-square w-full max-w-64 rounded-lg"
-                    src={result.qr_nodes_url}
-                    alt="完整节点二维码"
-                  />
-                </CardContent>
-              </Card>
+              {result.qr_uri_url ? (
+                <Card className="min-w-64 flex-1">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <QrCodeIcon />
+                      节点 URI 二维码
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <img
+                      className="mx-auto aspect-square w-full max-w-64 rounded-lg"
+                      src={result.qr_uri_url}
+                      alt="节点 URI 二维码"
+                    />
+                  </CardContent>
+                </Card>
+              ) : null}
             </div>
           </div>
         )}

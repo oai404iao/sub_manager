@@ -67,19 +67,26 @@ export type Subscription = {
   created_at: string
 }
 
+export type Share = {
+  id: number
+  kind: "node" | "group"
+  target_id: number
+  target_name: string
+  url: string
+  qr_url: string
+  qr_uri_url?: string
+  permanent: boolean
+  expired: boolean
+  expires_at: string | null
+  created_at: string
+}
+
 export type State = {
   user: User
   groups: Group[]
   nodes: Node[]
   subscriptions: Subscription[]
-}
-
-export type ShareResult = {
-  subscription_url: string
-  nodes_url: string
-  qr_subscription_url: string
-  qr_nodes_url: string
-  expires_at: string
+  shares: Share[]
 }
 
 export class APIError extends Error {

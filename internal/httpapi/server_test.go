@@ -3,14 +3,17 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oai404iao/sub_manager/internal/config"
 	"github.com/oai404iao/sub_manager/internal/model"
@@ -152,6 +155,200 @@ func TestSubscriptionCRUDAPI(t *testing.T) {
 	}
 	if len(nodes) != 0 {
 		t.Fatalf("delete should remove managed nodes, got %d", len(nodes))
+	}
+}
+
+func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	server := New(config.Config{
+		BaseURL:    "https://share.example",
+		SigningKey: "test-signing-key",
+	}, database)
+	handler := server.Handler()
+
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not set a session cookie")
+	}
+
+	group, err := database.CreateGroup(context.Background(), "shared group", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.SaveNode(context.Background(), model.Node{
+		Name:     "shared node",
+		Protocol: "socks5",
+		Server:   "proxy.example.com",
+		Port:     1080,
+		Username: "user",
+		Password: "password",
+		GroupIDs: []int64{group.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nodeResponse := performJSONRequest(t, handler, http.MethodPost, "/api/shares", map[string]any{
+		"kind":          "node",
+		"id":            node.ID,
+		"expires_hours": 24,
+		"permanent":     false,
+	}, cookies[0])
+	if nodeResponse.Code != http.StatusCreated {
+		t.Fatalf("node share status = %d body=%s", nodeResponse.Code, nodeResponse.Body.String())
+	}
+	var nodePayload map[string]json.RawMessage
+	if err := json.NewDecoder(nodeResponse.Body).Decode(&nodePayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacyField := range []string{
+		"subscription_url",
+		"nodes_url",
+		"qr_subscription_url",
+		"qr_nodes_url",
+	} {
+		if _, ok := nodePayload[legacyField]; ok {
+			t.Fatalf("legacy field %q is still present", legacyField)
+		}
+	}
+	nodeData, err := json.Marshal(nodePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeShare model.Share
+	if err := json.Unmarshal(nodeData, &nodeShare); err != nil {
+		t.Fatal(err)
+	}
+	if nodeShare.URL == "" || nodeShare.QRURL == "" || nodeShare.QRURIURL == "" {
+		t.Fatalf("node share is missing URL or QR codes: %#v", nodeShare)
+	}
+	if nodeShare.Permanent || nodeShare.ExpiresAt == nil {
+		t.Fatalf("node share should expire: %#v", nodeShare)
+	}
+	nodeQR, err := url.Parse(nodeShare.QRURIURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uri := nodeQR.Query().Get("data"); !strings.HasPrefix(uri, "socks5://") {
+		t.Fatalf("node URI QR data = %q", uri)
+	}
+
+	groupResponse := performJSONRequest(t, handler, http.MethodPost, "/api/shares", map[string]any{
+		"kind":      "group",
+		"id":        group.ID,
+		"permanent": true,
+	}, cookies[0])
+	if groupResponse.Code != http.StatusCreated {
+		t.Fatalf("group share status = %d body=%s", groupResponse.Code, groupResponse.Body.String())
+	}
+	var groupShare model.Share
+	if err := json.NewDecoder(groupResponse.Body).Decode(&groupShare); err != nil {
+		t.Fatal(err)
+	}
+	if !groupShare.Permanent || groupShare.ExpiresAt != nil {
+		t.Fatalf("group share should be permanent: %#v", groupShare)
+	}
+	if groupShare.URL == "" || groupShare.QRURL == "" || groupShare.QRURIURL != "" {
+		t.Fatalf("group QR variants are incorrect: %#v", groupShare)
+	}
+	parsedGroupURL, err := url.Parse(groupShare.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsedGroupURL.Query().Get("exp"); got != "0" {
+		t.Fatalf("permanent exp = %q, want 0", got)
+	}
+	if got := parsedGroupURL.Query().Get("content"); got != "subscription" {
+		t.Fatalf("share content = %q, want subscription", got)
+	}
+
+	publicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		publicResponse,
+		httptest.NewRequest(http.MethodGet, parsedGroupURL.RequestURI(), nil),
+	)
+	if publicResponse.Code != http.StatusOK {
+		t.Fatalf("public share status = %d body=%s", publicResponse.Code, publicResponse.Body.String())
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicResponse.Body.String()))
+	if err != nil {
+		t.Fatalf("public share is not a Base64 subscription: %v", err)
+	}
+	if !strings.HasPrefix(string(decoded), "socks5://") {
+		t.Fatalf("decoded subscription = %q", decoded)
+	}
+
+	legacyNodesURL := server.signedURL(
+		"node",
+		node.ID,
+		"nodes",
+		time.Now().Add(time.Hour).Unix(),
+	)
+	parsedLegacyURL, err := url.Parse(legacyNodesURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		legacyResponse,
+		httptest.NewRequest(http.MethodGet, parsedLegacyURL.RequestURI(), nil),
+	)
+	if legacyResponse.Code != http.StatusOK ||
+		!strings.HasPrefix(strings.TrimSpace(legacyResponse.Body.String()), "socks5://") {
+		t.Fatalf(
+			"legacy node share status=%d body=%q",
+			legacyResponse.Code,
+			legacyResponse.Body.String(),
+		)
+	}
+
+	stateResponse := performJSONRequest(t, handler, http.MethodGet, "/api/state", nil, cookies[0])
+	if stateResponse.Code != http.StatusOK {
+		t.Fatalf("state status = %d body=%s", stateResponse.Code, stateResponse.Body.String())
+	}
+	var state model.State
+	if err := json.NewDecoder(stateResponse.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Shares) != 2 {
+		t.Fatalf("share history count = %d, want 2", len(state.Shares))
+	}
+	if state.Shares[0].ID != groupShare.ID || state.Shares[0].QRURIURL != "" {
+		t.Fatalf("unexpected group share history: %#v", state.Shares[0])
+	}
+	if state.Shares[1].ID != nodeShare.ID || state.Shares[1].QRURIURL == "" {
+		t.Fatalf("unexpected node share history: %#v", state.Shares[1])
+	}
+
+	expiredURL := server.signedURL(
+		"node",
+		node.ID,
+		"subscription",
+		time.Now().Add(-time.Hour).Unix(),
+	)
+	parsedExpiredURL, err := url.Parse(expiredURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		expiredResponse,
+		httptest.NewRequest(http.MethodGet, parsedExpiredURL.RequestURI(), nil),
+	)
+	if expiredResponse.Code != http.StatusGone {
+		t.Fatalf("expired share status = %d, want %d", expiredResponse.Code, http.StatusGone)
 	}
 }
 

@@ -93,6 +93,16 @@ CREATE TABLE IF NOT EXISTS node_groups (
 	group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
 	PRIMARY KEY(node_id, group_id)
 );
+CREATE TABLE IF NOT EXISTS shares (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind TEXT NOT NULL CHECK(kind IN ('node', 'group')),
+	target_id INTEGER NOT NULL,
+	target_name TEXT NOT NULL,
+	url TEXT NOT NULL,
+	expires_at DATETIME,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_shares_created ON shares(created_at DESC, id DESC);
 `)
 	return err
 }
@@ -164,7 +174,17 @@ func (s *Store) State(ctx context.Context, user model.User) (model.State, error)
 	if err != nil {
 		return model.State{}, err
 	}
-	return model.State{User: user, Groups: groups, Nodes: nodes, Subscriptions: subscriptions}, nil
+	shares, err := s.Shares(ctx)
+	if err != nil {
+		return model.State{}, err
+	}
+	return model.State{
+		User:          user,
+		Groups:        groups,
+		Nodes:         nodes,
+		Subscriptions: subscriptions,
+		Shares:        shares,
+	}, nil
 }
 
 func (s *Store) Groups(ctx context.Context) ([]model.Group, error) {
@@ -477,8 +497,75 @@ func (s *Store) DeleteSubscription(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
+func (s *Store) CreateShare(ctx context.Context, item model.Share) (model.Share, error) {
+	var expiresAt any
+	if item.ExpiresAt != nil {
+		expiresAt = item.ExpiresAt.UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO shares(kind, target_id, target_name, url, expires_at)
+VALUES (?, ?, ?, ?, ?)`,
+		item.Kind, item.TargetID, item.TargetName, item.URL, expiresAt)
+	if err != nil {
+		return model.Share{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.Share{}, err
+	}
+	return s.Share(ctx, id)
+}
+
+func (s *Store) Shares(ctx context.Context) ([]model.Share, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, kind, target_id, target_name, url, expires_at, created_at
+FROM shares ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := []model.Share{}
+	for rows.Next() {
+		item, err := scanShare(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) Share(ctx context.Context, id int64) (model.Share, error) {
+	return scanShare(s.db.QueryRowContext(ctx, `
+SELECT id, kind, target_id, target_name, url, expires_at, created_at
+FROM shares WHERE id = ?`, id))
+}
+
 type scanner interface {
 	Scan(dest ...any) error
+}
+
+func scanShare(row scanner) (model.Share, error) {
+	var item model.Share
+	var expiresAt sql.NullTime
+	if err := row.Scan(
+		&item.ID,
+		&item.Kind,
+		&item.TargetID,
+		&item.TargetName,
+		&item.URL,
+		&expiresAt,
+		&item.CreatedAt,
+	); err != nil {
+		return model.Share{}, err
+	}
+	if expiresAt.Valid {
+		item.ExpiresAt = &expiresAt.Time
+	} else {
+		item.Permanent = true
+	}
+	return item, nil
 }
 
 func scanNode(row scanner) (model.Node, error) {

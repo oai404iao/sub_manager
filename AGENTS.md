@@ -10,7 +10,8 @@ Tailwind CSS v4 与 shadcn/ui（Base UI）。生产构建将 Vite 产物通过
 `go:embed` 打入单个 Go 二进制。
 
 当前支持 VLESS 与 SOCKS5，核心能力包括多格式导入、节点/分组/订阅 CRUD、
-订阅原子刷新、完整 Xray VLESS outbound 无损保存，以及带有效期的 HMAC 分享。
+订阅原子刷新、完整 Xray VLESS outbound 无损保存，以及可限时或永久的 HMAC
+分享与历史记录。
 用户界面、API 错误和主要文档使用中文；代码标识符使用英文。
 
 ## Repository Layout
@@ -115,7 +116,7 @@ React SPA
   -> handler validation / protocol normalization
   -> internal/store
   -> SQLite
-  -> /api/state reloads the complete dashboard state
+  -> /api/state reloads the complete dashboard state, including share history
 ```
 
 `/healthz`、`/api/version`、`/api/auth/login` 和 `/s` 是显式公开端点。其他
@@ -205,6 +206,8 @@ Xray JSON / form payload
 - 上游订阅抓取必须继续经过 `safeHTTPClient`：仅 HTTP/HTTPS、最多 5 次跳转、
   20 秒 client timeout、私网/回环/链路本地/保留地址阻断、响应最多读取 8 MiB。
 - 分享签名消息格式由 `shareMessage` 定义。改变字段或顺序会使已有 URL 失效。
+  新分享只生成一个订阅 URL；`exp=0` 表示永久分享，旧的 `content=nodes` URL
+  仍需保持可访问。
 - `SUBMAN_BASE_URL` 决定分享 URL 的外部地址；不要从不可信请求头推导。
 - 不要在日志、测试 fixture 或文档中加入真实节点密码、UUID、私钥或签名密钥。
 

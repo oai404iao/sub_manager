@@ -39,7 +39,7 @@
 | 多格式导入 | VLESS / SOCKS5 URI、Xray JSON/YAML、Mihomo YAML、标准与 URL-safe Base64、data URI |
 | Xray 无损往返 | 保存完整 VLESS `OutboundObject`，支持高级 JSON 编辑与单节点下载 |
 | 原子订阅刷新 | 刷新时在事务内替换订阅托管节点，避免出现半更新状态 |
-| 安全分享 | 带过期时间的 HMAC-SHA256 分享 URL，以及订阅 URL / 完整节点内容二维码 |
+| 安全分享 | 可限时或永久的 HMAC-SHA256 单一分享 URL、分享历史，以及按对象区分的二维码 |
 | 轻量部署 | React 前端通过 `go:embed` 打入 Go 二进制；同时提供 Docker / Compose |
 | 基础安全 | bcrypt 密码、Session 摘要存储、HttpOnly/SameSite Cookie、订阅请求 SSRF 防护 |
 
@@ -195,7 +195,8 @@ make docker-build
 1. 登录后创建分组，或在添加订阅时让系统自动创建目标分组。
 2. 粘贴节点 URI、Base64 订阅、Xray 配置或 Mihomo YAML 批量导入。
 3. 在节点编辑器中维护常用字段，必要时切换到完整 Xray JSON。
-4. 为节点或分组生成带有效期的订阅链接、明文节点链接或二维码。
+4. 为节点或分组生成限时或永久的订阅分享 URL，并可在分享历史中再次查看。
+   分组提供分享 URL 二维码，单节点还会额外提供节点 URI 二维码。
 5. 通过订阅列表手动刷新上游内容；系统会原子替换该订阅托管的节点。
 
 ## 架构
