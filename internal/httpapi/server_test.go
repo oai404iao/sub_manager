@@ -146,6 +146,13 @@ func TestSubscriptionCRUDAPI(t *testing.T) {
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d body=%s", deleted.Code, deleted.Body.String())
 	}
+	nodes, err = database.Nodes(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("delete should remove managed nodes, got %d", len(nodes))
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

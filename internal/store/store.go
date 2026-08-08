@@ -463,8 +463,18 @@ INSERT INTO node_groups(node_id, group_id) VALUES (?, ?)`, nodeID, groupID); err
 }
 
 func (s *Store) DeleteSubscription(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM subscriptions WHERE id = ?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE subscription_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM subscriptions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type scanner interface {

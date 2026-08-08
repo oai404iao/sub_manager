@@ -104,4 +104,11 @@ func TestSubscriptionCRUDAndNodeReplacement(t *testing.T) {
 	if _, err := database.Subscription(ctx, subscription.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected deleted subscription, got %v", err)
 	}
+	nodes, err = database.Nodes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("deleting a subscription should remove managed nodes: %#v", nodes)
+	}
 }
