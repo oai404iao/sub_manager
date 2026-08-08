@@ -25,15 +25,17 @@
 │   ├── version/                # 构建版本、提交与构建时间
 │   └── webassets/              # go:embed 前端产物
 ├── web/
+│   ├── public/brand/           # Logo 与静态品牌资产
 │   └── src/
 │       ├── components/ui/      # shadcn 官方源码组件
-│       ├── components/         # 业务组件
+│       ├── components/         # 业务组件与品牌组件
 │       └── lib/                # API client 与类型
 ├── scripts/                    # 版本更新、发布包与标签发布
 ├── .github/workflows/          # CI、GitHub Release 与 GHCR 发布
 ├── Dockerfile                  # Node/Go 多阶段构建与非 root 运行镜像
 ├── compose.example.yaml        # 持久卷和安全选项部署示例
 └── docs/
+    ├── brand.md                # 品牌设计与 Logo 使用规范
     ├── protocols/              # 协议配置项与兼容性说明
     └── implementation-plan.md
 ```

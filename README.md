@@ -1,4 +1,8 @@
-# Sub Manager
+<p align="center">
+  <img src="web/public/brand/logo-mark.svg" width="80" height="80" alt="Sub Manager Logo">
+</p>
+
+<h1 align="center">Sub Manager</h1>
 
 面向 Xray 与 Mihomo 的轻量订阅、节点和分组管理系统。当前首期支持
 VLESS 与 SOCKS5，React 前端会被打包并嵌入 Go 单文件程序。
@@ -121,6 +125,7 @@ SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.1
 ## 文档
 
 - [架构与目录设计](docs/architecture.md)
+- [品牌与 Logo 规范](docs/brand.md)
 - [VLESS 可配置项](docs/protocols/vless.md)
 - [SOCKS5 可配置项](docs/protocols/socks.md)
 - [实现计划](docs/implementation-plan.md)

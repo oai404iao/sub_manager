@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react"
-import { LockKeyholeIcon, LogInIcon } from "lucide-react"
+import { LogInIcon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { BrandLockup } from "@/components/brand-logo"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -47,13 +48,15 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   }
 
   return (
-    <main className="grid min-h-svh place-items-center bg-muted/40 p-6">
-      <Card className="w-full max-w-sm">
+    <main className="relative grid min-h-svh place-items-center overflow-hidden bg-muted/40 p-6">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(94,234,212,0.13),transparent_62%)]"
+      />
+      <Card className="relative w-full max-w-sm shadow-xl">
         <CardHeader>
-          <div className="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <LockKeyholeIcon />
-          </div>
-          <CardTitle>登录 Sub Manager</CardTitle>
+          <BrandLockup className="mb-3" />
+          <CardTitle>登录管理台</CardTitle>
           <CardDescription>
             管理 Xray 与 Mihomo 的订阅、分组和节点。
           </CardDescription>

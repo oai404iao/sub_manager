@@ -1,6 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react"
 import {
-  BoxesIcon,
   Code2Icon,
   CopyIcon,
   DownloadIcon,
@@ -17,6 +16,7 @@ import {
   Trash2Icon,
 } from "lucide-react"
 
+import { BrandLockup } from "@/components/brand-logo"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -330,15 +330,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       <header className="border-b bg-background">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <BoxesIcon />
-            </div>
-            <div className="min-w-0">
-              <h1 className="truncate font-heading font-medium">Sub Manager</h1>
-              <p className="truncate text-xs text-muted-foreground">
-                Xray / Mihomo 节点与订阅管理
-              </p>
-            </div>
+            <BrandLockup compact heading />
           </div>
           <div className="flex items-center gap-2">
             <span className="hidden text-sm text-muted-foreground sm:inline">
