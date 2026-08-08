@@ -143,7 +143,7 @@ Compose 默认使用 `ghcr.io/oai404iao/sub_manager:latest`。如需固定版本
 `.env` 中增加：
 
 ```dotenv
-SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.1
+SUBMAN_IMAGE=ghcr.io/oai404iao/sub_manager:0.1.2
 ```
 
 ### Docker CLI
@@ -162,7 +162,7 @@ docker run -d \
   -e SUBMAN_SIGNING_KEY="$(openssl rand -hex 32)" \
   -e SUBMAN_BASE_URL='https://sub.example.com' \
   -e SUBMAN_SECURE_COOKIE='true' \
-  ghcr.io/oai404iao/sub_manager:0.1.1
+  ghcr.io/oai404iao/sub_manager:0.1.2
 ```
 
 镜像默认以非 root 用户运行，数据库保存在 `/data/sub-manager.db`，并通过
