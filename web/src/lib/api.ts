@@ -1,0 +1,105 @@
+export type User = {
+  id: number
+  username: string
+}
+
+export type Group = {
+  id: number
+  name: string
+  description: string
+  node_count: number
+  created_at: string
+}
+
+export type Node = {
+  id: number
+  name: string
+  protocol: "vless" | "socks5"
+  server: string
+  port: number
+  uuid?: string
+  username?: string
+  password?: string
+  encryption?: string
+  flow?: string
+  network?: string
+  security?: string
+  sni?: string
+  alpn?: string[]
+  fingerprint?: string
+  allow_insecure: boolean
+  public_key?: string
+  short_id?: string
+  spider_x?: string
+  host?: string
+  path?: string
+  service_name?: string
+  authority?: string
+  header_type?: string
+  udp: boolean
+  tls: boolean
+  extra?: Record<string, string>
+  group_ids: number[]
+  subscription_id?: number
+  created_at: string
+  updated_at: string
+}
+
+export type Subscription = {
+  id: number
+  name: string
+  url: string
+  group_id: number
+  last_status: string
+  last_error?: string
+  last_synced_at?: string
+  created_at: string
+}
+
+export type State = {
+  user: User
+  groups: Group[]
+  nodes: Node[]
+  subscriptions: Subscription[]
+}
+
+export type ShareResult = {
+  subscription_url: string
+  nodes_url: string
+  qr_subscription_url: string
+  qr_nodes_url: string
+  expires_at: string
+}
+
+export class APIError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+export async function api<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+    ...options,
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: string
+    } | null
+    throw new APIError(response.status, body?.error ?? `HTTP ${response.status}`)
+  }
+  if (response.status === 204) {
+    return undefined as T
+  }
+  return (await response.json()) as T
+}

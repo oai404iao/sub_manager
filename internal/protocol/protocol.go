@@ -1,0 +1,483 @@
+package protocol
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"submanager/internal/model"
+)
+
+func ParseText(input string) ([]model.Node, error) {
+	input = strings.TrimSpace(strings.TrimPrefix(input, "\uFEFF"))
+	if input == "" {
+		return nil, errors.New("empty import content")
+	}
+
+	if nodes, ok := parseMihomoYAML(input); ok {
+		return nodes, nil
+	}
+
+	content := decodeSubscription(input)
+	var nodes []model.Node
+	var parseErrors []string
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		node, err := ParseURI(line)
+		if err != nil {
+			parseErrors = append(parseErrors, err.Error())
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		if len(parseErrors) > 0 {
+			return nil, fmt.Errorf("no supported nodes found: %s", strings.Join(parseErrors, "; "))
+		}
+		return nil, errors.New("no supported VLESS or SOCKS5 nodes found")
+	}
+	return nodes, nil
+}
+
+func ParseURI(raw string) (model.Node, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return model.Node{}, err
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "vless":
+		return parseVLESS(parsed)
+	case "socks", "socks5":
+		return parseSOCKS(parsed)
+	default:
+		return model.Node{}, fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+}
+
+func URI(node model.Node) (string, error) {
+	switch node.Protocol {
+	case "vless":
+		return vlessURI(node)
+	case "socks5":
+		return socksURI(node)
+	default:
+		return "", fmt.Errorf("unsupported protocol %q", node.Protocol)
+	}
+}
+
+func Subscription(nodes []model.Node) (string, error) {
+	lines := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		line, err := URI(node)
+		if err != nil {
+			return "", err
+		}
+		lines = append(lines, line)
+	}
+	return base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n"))), nil
+}
+
+func FullContent(nodes []model.Node) (string, error) {
+	lines := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		line, err := URI(node)
+		if err != nil {
+			return "", err
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func parseVLESS(parsed *url.URL) (model.Node, error) {
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return model.Node{}, errors.New("VLESS port is invalid")
+	}
+	id := ""
+	if parsed.User != nil {
+		id = parsed.User.Username()
+	}
+	if id == "" || parsed.Hostname() == "" {
+		return model.Node{}, errors.New("VLESS UUID and server are required")
+	}
+	query := parsed.Query()
+	known := map[string]bool{
+		"encryption": true, "flow": true, "type": true, "security": true,
+		"sni": true, "alpn": true, "fp": true, "allowInsecure": true,
+		"pbk": true, "sid": true, "spx": true, "host": true, "path": true,
+		"serviceName": true, "authority": true, "headerType": true, "udp": true,
+	}
+	node := model.Node{
+		Name:          defaultName(parsed.Fragment, parsed.Hostname()),
+		Protocol:      "vless",
+		Server:        parsed.Hostname(),
+		Port:          port,
+		UUID:          id,
+		Encryption:    valueOr(query.Get("encryption"), "none"),
+		Flow:          query.Get("flow"),
+		Network:       valueOr(query.Get("type"), "tcp"),
+		Security:      valueOr(query.Get("security"), "none"),
+		SNI:           query.Get("sni"),
+		ALPN:          splitComma(query.Get("alpn")),
+		Fingerprint:   query.Get("fp"),
+		AllowInsecure: parseBool(query.Get("allowInsecure")),
+		PublicKey:     query.Get("pbk"),
+		ShortID:       query.Get("sid"),
+		SpiderX:       query.Get("spx"),
+		Host:          query.Get("host"),
+		Path:          query.Get("path"),
+		ServiceName:   query.Get("serviceName"),
+		Authority:     query.Get("authority"),
+		HeaderType:    query.Get("headerType"),
+		UDP:           query.Get("udp") == "" || parseBool(query.Get("udp")),
+		Extra:         extras(query, known),
+	}
+	return node, Validate(node)
+}
+
+func parseSOCKS(parsed *url.URL) (model.Node, error) {
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return model.Node{}, errors.New("SOCKS5 port is invalid")
+	}
+	query := parsed.Query()
+	username, password := "", ""
+	if parsed.User != nil {
+		username = parsed.User.Username()
+		password, _ = parsed.User.Password()
+	}
+	known := map[string]bool{
+		"udp": true, "tls": true, "sni": true, "allowInsecure": true,
+	}
+	node := model.Node{
+		Name:          defaultName(parsed.Fragment, parsed.Hostname()),
+		Protocol:      "socks5",
+		Server:        parsed.Hostname(),
+		Port:          port,
+		Username:      username,
+		Password:      password,
+		UDP:           parseBool(query.Get("udp")),
+		TLS:           parseBool(query.Get("tls")),
+		SNI:           query.Get("sni"),
+		AllowInsecure: parseBool(query.Get("allowInsecure")),
+		Extra:         extras(query, known),
+	}
+	return node, Validate(node)
+}
+
+func vlessURI(node model.Node) (string, error) {
+	if err := Validate(node); err != nil {
+		return "", err
+	}
+	query := url.Values{}
+	query.Set("encryption", valueOr(node.Encryption, "none"))
+	set(query, "flow", node.Flow)
+	if node.Network != "" && node.Network != "tcp" {
+		query.Set("type", node.Network)
+	}
+	if node.Security != "" && node.Security != "none" {
+		query.Set("security", node.Security)
+	}
+	set(query, "sni", node.SNI)
+	if len(node.ALPN) > 0 {
+		query.Set("alpn", strings.Join(node.ALPN, ","))
+	}
+	set(query, "fp", node.Fingerprint)
+	if node.AllowInsecure {
+		query.Set("allowInsecure", "true")
+	}
+	set(query, "pbk", node.PublicKey)
+	set(query, "sid", node.ShortID)
+	set(query, "spx", node.SpiderX)
+	set(query, "host", node.Host)
+	set(query, "path", node.Path)
+	set(query, "serviceName", node.ServiceName)
+	set(query, "authority", node.Authority)
+	set(query, "headerType", node.HeaderType)
+	if !node.UDP {
+		query.Set("udp", "false")
+	}
+	for key, value := range node.Extra {
+		if !query.Has(key) {
+			query.Set(key, value)
+		}
+	}
+	return (&url.URL{
+		Scheme:   "vless",
+		User:     url.User(node.UUID),
+		Host:     net.JoinHostPort(node.Server, strconv.Itoa(node.Port)),
+		RawQuery: query.Encode(),
+		Fragment: node.Name,
+	}).String(), nil
+}
+
+func socksURI(node model.Node) (string, error) {
+	if err := Validate(node); err != nil {
+		return "", err
+	}
+	query := url.Values{}
+	if node.UDP {
+		query.Set("udp", "true")
+	}
+	if node.TLS {
+		query.Set("tls", "true")
+	}
+	set(query, "sni", node.SNI)
+	if node.AllowInsecure {
+		query.Set("allowInsecure", "true")
+	}
+	for key, value := range node.Extra {
+		if !query.Has(key) {
+			query.Set(key, value)
+		}
+	}
+	var user *url.Userinfo
+	if node.Username != "" {
+		user = url.UserPassword(node.Username, node.Password)
+	}
+	return (&url.URL{
+		Scheme:   "socks5",
+		User:     user,
+		Host:     net.JoinHostPort(node.Server, strconv.Itoa(node.Port)),
+		RawQuery: query.Encode(),
+		Fragment: node.Name,
+	}).String(), nil
+}
+
+func Validate(node model.Node) error {
+	if strings.TrimSpace(node.Name) == "" {
+		return errors.New("node name is required")
+	}
+	if strings.TrimSpace(node.Server) == "" {
+		return errors.New("server is required")
+	}
+	if node.Port < 1 || node.Port > 65535 {
+		return errors.New("port must be between 1 and 65535")
+	}
+	switch node.Protocol {
+	case "vless":
+		if node.UUID == "" {
+			return errors.New("VLESS UUID is required")
+		}
+		if node.Security == "reality" && (node.SNI == "" || node.PublicKey == "") {
+			return errors.New("REALITY requires SNI and public key")
+		}
+	case "socks5":
+	default:
+		return errors.New("protocol must be vless or socks5")
+	}
+	return nil
+}
+
+func parseMihomoYAML(input string) ([]model.Node, bool) {
+	var document struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if yaml.Unmarshal([]byte(input), &document) != nil || len(document.Proxies) == 0 {
+		return nil, false
+	}
+	nodes := make([]model.Node, 0, len(document.Proxies))
+	for _, proxy := range document.Proxies {
+		kind := lowerString(proxy["type"])
+		switch kind {
+		case "vless":
+			node := model.Node{
+				Name:          stringValue(proxy["name"]),
+				Protocol:      "vless",
+				Server:        stringValue(proxy["server"]),
+				Port:          intValue(proxy["port"]),
+				UUID:          stringValue(proxy["uuid"]),
+				Flow:          stringValue(proxy["flow"]),
+				Encryption:    "none",
+				Network:       valueOr(stringValue(proxy["network"]), "tcp"),
+				Security:      "none",
+				SNI:           stringValue(proxy["servername"]),
+				Fingerprint:   stringValue(proxy["client-fingerprint"]),
+				AllowInsecure: boolValue(proxy["skip-cert-verify"]),
+				UDP:           boolDefault(proxy["udp"], true),
+				Extra:         map[string]string{},
+			}
+			if boolValue(proxy["tls"]) {
+				node.Security = "tls"
+			}
+			if reality, ok := proxy["reality-opts"].(map[string]any); ok {
+				node.Security = "reality"
+				node.PublicKey = stringValue(reality["public-key"])
+				node.ShortID = stringValue(reality["short-id"])
+			}
+			if options, ok := proxy["ws-opts"].(map[string]any); ok {
+				node.Path = stringValue(options["path"])
+				if headers, ok := options["headers"].(map[string]any); ok {
+					node.Host = stringValue(headers["Host"])
+					if node.Host == "" {
+						node.Host = stringValue(headers["host"])
+					}
+				}
+			}
+			if options, ok := proxy["grpc-opts"].(map[string]any); ok {
+				node.ServiceName = stringValue(options["grpc-service-name"])
+			}
+			if Validate(node) == nil {
+				nodes = append(nodes, node)
+			}
+		case "socks5", "socks":
+			node := model.Node{
+				Name:          stringValue(proxy["name"]),
+				Protocol:      "socks5",
+				Server:        stringValue(proxy["server"]),
+				Port:          intValue(proxy["port"]),
+				Username:      stringValue(proxy["username"]),
+				Password:      stringValue(proxy["password"]),
+				UDP:           boolValue(proxy["udp"]),
+				TLS:           boolValue(proxy["tls"]),
+				SNI:           stringValue(proxy["servername"]),
+				AllowInsecure: boolValue(proxy["skip-cert-verify"]),
+				Extra:         map[string]string{},
+			}
+			if Validate(node) == nil {
+				nodes = append(nodes, node)
+			}
+		}
+	}
+	return nodes, true
+}
+
+func decodeSubscription(input string) string {
+	if strings.Contains(input, "://") || strings.Contains(input, "\n") {
+		return input
+	}
+	compact := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, input)
+	encodings := []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
+	}
+	for _, encoding := range encodings {
+		if decoded, err := encoding.DecodeString(compact); err == nil {
+			return string(decoded)
+		}
+	}
+	return input
+}
+
+func extras(values url.Values, known map[string]bool) map[string]string {
+	extra := map[string]string{}
+	for key := range values {
+		if !known[key] {
+			extra[key] = values.Get(key)
+		}
+	}
+	return extra
+}
+
+func set(values url.Values, key, value string) {
+	if value != "" {
+		values.Set(key, value)
+	}
+}
+
+func splitComma(value string) []string {
+	if value == "" {
+		return nil
+	}
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func parseBool(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func defaultName(name, server string) string {
+	if name != "" {
+		return name
+	}
+	return server
+}
+
+func valueOr(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func lowerString(value any) string {
+	return strings.ToLower(stringValue(value))
+}
+
+func stringValue(value any) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	case int:
+		return strconv.Itoa(value)
+	case int64:
+		return strconv.FormatInt(value, 10)
+	case float64:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	default:
+		return ""
+	}
+}
+
+func intValue(value any) int {
+	switch value := value.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case string:
+		result, _ := strconv.Atoi(value)
+		return result
+	default:
+		return 0
+	}
+}
+
+func boolValue(value any) bool {
+	switch value := value.(type) {
+	case bool:
+		return value
+	case string:
+		return parseBool(value)
+	default:
+		return false
+	}
+}
+
+func boolDefault(value any, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return boolValue(value)
+}
+
+func JSON(node model.Node) string {
+	value, _ := json.Marshal(node)
+	return string(value)
+}

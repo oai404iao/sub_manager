@@ -1,0 +1,10 @@
+/bin/
+/data/
+/internal/webassets/dist/*
+!/internal/webassets/dist/index.html
+/web/node_modules/
+/web/dist/
+*.db
+*.db-shm
+*.db-wal
+.env

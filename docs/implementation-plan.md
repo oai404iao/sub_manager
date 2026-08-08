@@ -1,0 +1,39 @@
+# 实现计划
+
+## Phase 1（当前骨架/MVP）
+
+- [x] Go + React/Vite + shadcn/ui 工程骨架
+- [x] SQLite schema、管理员初始化、Cookie Session
+- [x] VLESS 与 SOCKS5 URI 解析/生成
+- [x] Base64 文本订阅和 Mihomo YAML 解析
+- [x] 节点、分组、订阅 API
+- [x] HMAC 参数签名分享 URL
+- [x] 两类二维码
+- [x] 基础管理界面
+
+## Phase 2（可用性与兼容）
+
+- [ ] 节点批量选择、拖拽入组、批量删除/导出
+- [ ] 订阅定时刷新、差异预览、失效节点保留策略
+- [ ] VLESS WS/gRPC/XHTTP/HTTPUpgrade 全字段表单
+- [ ] Mihomo 与 Xray JSON 双向导出
+- [ ] 节点去重规则（协议 + 服务端 + 端口 + 身份）
+- [ ] 审计日志与登录限流
+
+## Phase 3（运行与质量）
+
+- [ ] 节点连通性、TLS 握手、延迟探测
+- [ ] 多用户/RBAC
+- [ ] PostgreSQL
+- [ ] OpenAPI、端到端测试、版本化迁移
+- [ ] Docker 与 GitHub Actions 发布
+
+## 首期验收
+
+1. 可登录并创建分组。
+2. 可粘贴 VLESS/SOCKS 链接，或填写订阅 URL 导入。
+3. 可在界面编辑节点名称、地址、端口及协议关键参数。
+4. 可按分组筛选节点。
+5. 可为节点/分组生成带过期时间和签名的公开 URL。
+6. 可生成“订阅 URL”二维码和“完整节点内容”二维码。
+7. `make build` 生成一个可直接运行的 Go 二进制。
