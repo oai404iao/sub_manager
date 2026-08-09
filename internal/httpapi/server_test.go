@@ -427,12 +427,20 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 		context.Background(),
 		subscription.ID,
 		firstGroup.ID,
-		[]model.Node{{
-			Name:     "managed",
-			Protocol: "socks5",
-			Server:   "managed.example.com",
-			Port:     1080,
-		}},
+		[]model.Node{
+			{
+				Name:     "managed one",
+				Protocol: "socks5",
+				Server:   "managed-one.example.com",
+				Port:     1080,
+			},
+			{
+				Name:     "managed two",
+				Protocol: "socks5",
+				Server:   "managed-two.example.com",
+				Port:     1080,
+			},
+		},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -440,15 +448,14 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var managedNode model.Node
+	managedNodes := []model.Node{}
 	for _, node := range allNodes {
 		if node.SubscriptionID != nil {
-			managedNode = node
-			break
+			managedNodes = append(managedNodes, node)
 		}
 	}
-	if managedNode.ID == 0 {
-		t.Fatal("managed node was not created")
+	if len(managedNodes) != 2 {
+		t.Fatalf("managed nodes = %d, want 2", len(managedNodes))
 	}
 	managedResponse := performJSONRequest(
 		t,
@@ -456,19 +463,100 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 		http.MethodPatch,
 		"/api/nodes/groups",
 		map[string]any{
-			"ids":       []int64{managedNode.ID},
+			"ids":       []int64{managedNodes[0].ID},
 			"group_ids": []int64{secondGroup.ID},
 			"mode":      "add",
 		},
 		cookies[0],
 	)
 	if managedResponse.Code != http.StatusBadRequest ||
-		!strings.Contains(managedResponse.Body.String(), "订阅托管节点") {
+		!strings.Contains(managedResponse.Body.String(), "整条订阅迁移") {
 		t.Fatalf(
 			"managed group update status = %d body=%s",
 			managedResponse.Code,
 			managedResponse.Body.String(),
 		)
+	}
+	managedResponse = performJSONRequest(
+		t,
+		handler,
+		http.MethodPatch,
+		"/api/nodes/groups",
+		map[string]any{
+			"ids":       []int64{managedNodes[0].ID},
+			"group_ids": []int64{secondGroup.ID},
+			"mode":      "replace",
+		},
+		cookies[0],
+	)
+	if managedResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"managed replace status = %d body=%s",
+			managedResponse.Code,
+			managedResponse.Body.String(),
+		)
+	}
+	var managedResult struct {
+		Updated       int `json:"updated"`
+		Subscriptions int `json:"subscriptions"`
+	}
+	if err := json.NewDecoder(managedResponse.Body).Decode(&managedResult); err != nil {
+		t.Fatal(err)
+	}
+	if managedResult.Updated != 2 || managedResult.Subscriptions != 1 {
+		t.Fatalf("unexpected managed replace result: %#v", managedResult)
+	}
+	subscription, err = database.Subscription(context.Background(), subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subscription.GroupID != secondGroup.ID {
+		t.Fatalf("subscription group = %d, want %d", subscription.GroupID, secondGroup.ID)
+	}
+	for _, managedNode := range managedNodes {
+		node, err := database.Node(context.Background(), managedNode.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != secondGroup.ID {
+			t.Fatalf("managed node was not migrated: %#v", node.GroupIDs)
+		}
+	}
+	managedNodes[0].GroupIDs = []int64{firstGroup.ID}
+	saveManagedResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPut,
+		"/api/nodes/"+strconv.FormatInt(managedNodes[0].ID, 10),
+		managedNodes[0],
+		cookies[0],
+	)
+	if saveManagedResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"save managed node status = %d body=%s",
+			saveManagedResponse.Code,
+			saveManagedResponse.Body.String(),
+		)
+	}
+	subscription, err = database.Subscription(context.Background(), subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subscription.GroupID != firstGroup.ID {
+		t.Fatalf(
+			"saved subscription group = %d, want %d",
+			subscription.GroupID,
+			firstGroup.ID,
+		)
+	}
+	for _, managedNode := range managedNodes {
+		node, err := database.Node(context.Background(), managedNode.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != firstGroup.ID {
+			t.Fatalf("saved managed node was not migrated: %#v", node.GroupIDs)
+		}
 	}
 	if err := database.DeleteSubscription(context.Background(), subscription.ID); err != nil {
 		t.Fatal(err)
@@ -609,6 +697,25 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	if nodeShare.Permanent || nodeShare.ExpiresAt == nil {
 		t.Fatalf("node share should expire: %#v", nodeShare)
 	}
+	parsedNodeURL, err := url.Parse(nodeShare.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedNodeURL.Query().Get("share") == "" {
+		t.Fatalf("managed node share is missing revocation token: %q", nodeShare.URL)
+	}
+	nodePublicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		nodePublicResponse,
+		httptest.NewRequest(http.MethodGet, parsedNodeURL.RequestURI(), nil),
+	)
+	if nodePublicResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"node public share status=%d body=%q",
+			nodePublicResponse.Code,
+			nodePublicResponse.Body.String(),
+		)
+	}
 	nodeQR, err := url.Parse(nodeShare.QRURIURL)
 	if err != nil {
 		t.Fatal(err)
@@ -705,6 +812,171 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	}
 	if state.Shares[1].ID != nodeShare.ID || state.Shares[1].QRURIURL == "" {
 		t.Fatalf("unexpected node share history: %#v", state.Shares[1])
+	}
+
+	revokeResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/shares/"+strconv.FormatInt(nodeShare.ID, 10)+"/revoke",
+		nil,
+		cookies[0],
+	)
+	if revokeResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"revoke share status=%d body=%s",
+			revokeResponse.Code,
+			revokeResponse.Body.String(),
+		)
+	}
+	var revokedShare model.Share
+	if err := json.NewDecoder(revokeResponse.Body).Decode(&revokedShare); err != nil {
+		t.Fatal(err)
+	}
+	if !revokedShare.Revoked || revokedShare.RevokedAt == nil {
+		t.Fatalf("share was not revoked: %#v", revokedShare)
+	}
+	revokedPublicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		revokedPublicResponse,
+		httptest.NewRequest(http.MethodGet, parsedNodeURL.RequestURI(), nil),
+	)
+	if revokedPublicResponse.Code != http.StatusGone {
+		t.Fatalf(
+			"revoked public share status=%d body=%q",
+			revokedPublicResponse.Code,
+			revokedPublicResponse.Body.String(),
+		)
+	}
+	deleteNodeShareResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodDelete,
+		"/api/shares/"+strconv.FormatInt(nodeShare.ID, 10),
+		nil,
+		cookies[0],
+	)
+	if deleteNodeShareResponse.Code != http.StatusNoContent {
+		t.Fatalf(
+			"delete node share status=%d body=%s",
+			deleteNodeShareResponse.Code,
+			deleteNodeShareResponse.Body.String(),
+		)
+	}
+	deletedPublicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		deletedPublicResponse,
+		httptest.NewRequest(http.MethodGet, parsedNodeURL.RequestURI(), nil),
+	)
+	if deletedPublicResponse.Code != http.StatusGone {
+		t.Fatalf(
+			"deleted public share status=%d body=%q",
+			deletedPublicResponse.Code,
+			deletedPublicResponse.Body.String(),
+		)
+	}
+
+	deleteGroupShareResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodDelete,
+		"/api/shares/"+strconv.FormatInt(groupShare.ID, 10),
+		nil,
+		cookies[0],
+	)
+	if deleteGroupShareResponse.Code != http.StatusNoContent {
+		t.Fatalf(
+			"delete group share status=%d body=%s",
+			deleteGroupShareResponse.Code,
+			deleteGroupShareResponse.Body.String(),
+		)
+	}
+	deletedGroupPublicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		deletedGroupPublicResponse,
+		httptest.NewRequest(http.MethodGet, parsedGroupURL.RequestURI(), nil),
+	)
+	if deletedGroupPublicResponse.Code != http.StatusGone {
+		t.Fatalf(
+			"deleted group public share status=%d body=%q",
+			deletedGroupPublicResponse.Code,
+			deletedGroupPublicResponse.Body.String(),
+		)
+	}
+
+	legacyShare, err := database.CreateShare(context.Background(), model.Share{
+		Kind:       "node",
+		TargetID:   node.ID,
+		TargetName: node.Name,
+		URL:        legacyNodesURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRevokeResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/shares/"+strconv.FormatInt(legacyShare.ID, 10)+"/revoke",
+		nil,
+		cookies[0],
+	)
+	if legacyRevokeResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"legacy revoke status=%d body=%s",
+			legacyRevokeResponse.Code,
+			legacyRevokeResponse.Body.String(),
+		)
+	}
+	revokedLegacyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		revokedLegacyResponse,
+		httptest.NewRequest(http.MethodGet, parsedLegacyURL.RequestURI(), nil),
+	)
+	if revokedLegacyResponse.Code != http.StatusGone {
+		t.Fatalf(
+			"revoked legacy share status=%d body=%q",
+			revokedLegacyResponse.Code,
+			revokedLegacyResponse.Body.String(),
+		)
+	}
+	legacyDeleteResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodDelete,
+		"/api/shares/"+strconv.FormatInt(legacyShare.ID, 10),
+		nil,
+		cookies[0],
+	)
+	if legacyDeleteResponse.Code != http.StatusNoContent {
+		t.Fatalf(
+			"legacy delete status=%d body=%s",
+			legacyDeleteResponse.Code,
+			legacyDeleteResponse.Body.String(),
+		)
+	}
+	deletedLegacyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		deletedLegacyResponse,
+		httptest.NewRequest(http.MethodGet, parsedLegacyURL.RequestURI(), nil),
+	)
+	if deletedLegacyResponse.Code != http.StatusGone {
+		t.Fatalf(
+			"deleted legacy share status=%d body=%q",
+			deletedLegacyResponse.Code,
+			deletedLegacyResponse.Body.String(),
+		)
+	}
+
+	stateResponse = performJSONRequest(t, handler, http.MethodGet, "/api/state", nil, cookies[0])
+	if stateResponse.Code != http.StatusOK {
+		t.Fatalf("state after share management status = %d", stateResponse.Code)
+	}
+	if err := json.NewDecoder(stateResponse.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Shares) != 0 {
+		t.Fatalf("deleted shares are still listed: %#v", state.Shares)
 	}
 
 	expiredURL := server.signedURL(

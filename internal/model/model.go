@@ -80,9 +80,13 @@ type Share struct {
 	URL        string     `json:"url"`
 	QRURL      string     `json:"qr_url,omitempty"`
 	QRURIURL   string     `json:"qr_uri_url,omitempty"`
+	TokenHash  string     `json:"-"`
 	Permanent  bool       `json:"permanent"`
 	Expired    bool       `json:"expired"`
+	Revoked    bool       `json:"revoked"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at"`
+	DeletedAt  *time.Time `json:"-"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 

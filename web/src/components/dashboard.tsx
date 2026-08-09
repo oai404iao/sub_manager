@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react"
 import {
   ArrowLeftIcon,
+  BanIcon,
   Code2Icon,
   CopyIcon,
   DownloadIcon,
@@ -43,6 +44,7 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -94,6 +96,7 @@ import {
   type NodeExportFormat,
   type NodeExportResult,
   type NodeGroupUpdateMode,
+  type NodeGroupUpdateResult,
   type Share,
   type State,
   type Subscription,
@@ -363,6 +366,11 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   const selectedHasManagedNodes = selectedNodes.some(
     (node) => node.subscription_id != null,
   )
+  const selectedSubscriptionCount = new Set(
+    selectedNodes
+      .map((node) => node.subscription_id)
+      .filter((id): id is number => id != null),
+  ).size
 
   async function run(
     action: () => Promise<unknown>,
@@ -429,21 +437,28 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
     const ids = selectedNodes.map((node) => node.id)
     if (ids.length === 0) return false
     setBatchPending(true)
+    setError("")
+    setNotice("")
     try {
-      const updated = await run(
-        () =>
-          api("/api/nodes/groups", {
-            method: "PATCH",
-            body: JSON.stringify({
-              ids,
-              group_ids: groupIDs,
-              mode,
-            }),
-          }),
-        `已更新 ${ids.length} 个节点的分组。`,
+      const result = await api<NodeGroupUpdateResult>("/api/nodes/groups", {
+        method: "PATCH",
+        body: JSON.stringify({
+          ids,
+          group_ids: groupIDs,
+          mode,
+        }),
+      })
+      await onReload()
+      setNotice(
+        result.subscriptions > 0
+          ? `已更新 ${result.updated} 个节点，并迁移 ${result.subscriptions} 条订阅。`
+          : `已更新 ${result.updated} 个节点的分组。`,
       )
-      if (updated) setSelectedNodeIDs(new Set())
-      return updated
+      setSelectedNodeIDs(new Set())
+      return true
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "修改分组失败")
+      return false
     } finally {
       setBatchPending(false)
     }
@@ -782,6 +797,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
         open={batchGroupOpen}
         groups={state.groups}
         selectedCount={selectedNodes.length}
+        managedSubscriptionCount={selectedSubscriptionCount}
         error={error}
         pending={batchPending}
         onOpenChange={(open) => {
@@ -895,17 +911,7 @@ function NodeTable({
           {selectedCount > 0 ? (
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">已选择 {selectedCount} 个</Badge>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={selectedHasManagedNodes}
-                title={
-                  selectedHasManagedNodes
-                    ? "订阅托管节点的分组由订阅决定"
-                    : undefined
-                }
-                onClick={onBatchGroups}
-              >
+              <Button variant="outline" size="sm" onClick={onBatchGroups}>
                 <PencilIcon data-icon="inline-start" />
                 修改分组
               </Button>
@@ -940,7 +946,7 @@ function NodeTable({
               </Button>
               {selectedHasManagedNodes ? (
                 <span className="text-xs text-muted-foreground">
-                  订阅托管节点不能修改分组。
+                  修改托管节点时，整条订阅及其全部节点会一起迁移。
                 </span>
               ) : null}
             </div>
@@ -1047,6 +1053,7 @@ function BatchGroupDialog({
   open,
   groups,
   selectedCount,
+  managedSubscriptionCount,
   error,
   pending,
   onOpenChange,
@@ -1055,12 +1062,16 @@ function BatchGroupDialog({
   open: boolean
   groups: Group[]
   selectedCount: number
+  managedSubscriptionCount: number
   error: string
   pending: boolean
   onOpenChange: (open: boolean) => void
   onApply: (mode: NodeGroupUpdateMode, groupIDs: number[]) => Promise<boolean>
 }) {
-  const [mode, setMode] = useState<NodeGroupUpdateMode>("add")
+  const managed = managedSubscriptionCount > 0
+  const [mode, setMode] = useState<NodeGroupUpdateMode>(
+    managed ? "replace" : "add",
+  )
   const [groupIDs, setGroupIDs] = useState<number[]>([])
   const [validationError, setValidationError] = useState("")
   const modeDescription = {
@@ -1068,6 +1079,13 @@ function BatchGroupDialog({
     remove: "仅从勾选分组移出，其他分组保持不变。",
     replace: "将直接分组替换为勾选结果；不勾选会清空全部分组。",
   }[mode]
+  const targetGroupItems = [
+    { label: "请选择目标分组", value: "0" },
+    ...groups.map((group) => ({
+      label: group.name,
+      value: String(group.id),
+    })),
+  ]
 
   function setGroup(groupID: number, checked: boolean) {
     setGroupIDs((current) =>
@@ -1080,11 +1098,15 @@ function BatchGroupDialog({
   async function submit(event: FormEvent) {
     event.preventDefault()
     setValidationError("")
-    if (mode !== "replace" && groupIDs.length === 0) {
+    if (managed && groupIDs.length !== 1) {
+      setValidationError("请选择一个订阅目标分组")
+      return
+    }
+    if (!managed && mode !== "replace" && groupIDs.length === 0) {
       setValidationError("请至少选择一个分组")
       return
     }
-    if (await onApply(mode, groupIDs)) {
+    if (await onApply(managed ? "replace" : mode, groupIDs)) {
       onOpenChange(false)
     }
   }
@@ -1099,76 +1121,120 @@ function BatchGroupDialog({
       <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-xl">
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>批量修改分组</DialogTitle>
+            <DialogTitle>
+              {managed ? "迁移订阅与节点" : "批量修改分组"}
+            </DialogTitle>
             <DialogDescription>
-              将对已选择的 {selectedCount} 个节点修改直接所属分组。
+              {managed
+                ? `已选择 ${selectedCount} 个节点，涉及 ${managedSubscriptionCount} 条订阅。`
+                : `将对已选择的 ${selectedCount} 个节点修改直接所属分组。`}
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
-            <Field>
-              <FieldLabel>修改方式</FieldLabel>
-              <Select
-                items={nodeGroupModeItems}
-                value={mode}
-                disabled={pending}
-                onValueChange={(value) => {
-                  if (
-                    value === "add" ||
-                    value === "remove" ||
-                    value === "replace"
-                  ) {
-                    setMode(value)
-                    setValidationError("")
-                  }
-                }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent alignItemWithTrigger={false}>
-                  <SelectGroup>
-                    {nodeGroupModeItems.map((item) => (
-                      <SelectItem key={item.value} value={item.value}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FieldDescription>{modeDescription}</FieldDescription>
-            </Field>
-            <FieldSet>
-              <FieldLegend variant="label">选择分组</FieldLegend>
-              {groups.length > 0 ? (
-                <FieldGroup className="max-h-64 overflow-y-auto rounded-lg border p-3">
-                  {groups.map((group) => {
-                    const checkboxID = `batch-node-group-${group.id}`
-                    return (
-                      <Field key={group.id} orientation="horizontal">
-                        <Checkbox
-                          id={checkboxID}
-                          checked={groupIDs.includes(group.id)}
-                          disabled={pending}
-                          onCheckedChange={(checked) =>
-                            setGroup(group.id, checked)
-                          }
-                        />
-                        <FieldLabel
-                          htmlFor={checkboxID}
-                          className="font-normal"
-                        >
-                          {group.name}
-                        </FieldLabel>
-                      </Field>
-                    )
-                  })}
-                </FieldGroup>
-              ) : (
-                <FieldDescription>
-                  暂无分组；使用“替换全部分组”可清空节点分组。
-                </FieldDescription>
-              )}
-            </FieldSet>
+            {managed ? (
+              <>
+                <Alert>
+                  <AlertTitle>整条订阅迁移</AlertTitle>
+                  <AlertDescription>
+                    每条相关订阅的目标分组及其全部托管节点会一起迁移；
+                    同时选中的手工节点会替换为同一分组。
+                  </AlertDescription>
+                </Alert>
+                <Field>
+                  <FieldLabel>目标分组</FieldLabel>
+                  <Select
+                    items={targetGroupItems}
+                    value={String(groupIDs[0] ?? 0)}
+                    disabled={pending}
+                    onValueChange={(value) => {
+                      const groupID = Number(value)
+                      setGroupIDs(groupID > 0 ? [groupID] : [])
+                      setValidationError("")
+                    }}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        {targetGroupItems.map((item) => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field>
+                  <FieldLabel>修改方式</FieldLabel>
+                  <Select
+                    items={nodeGroupModeItems}
+                    value={mode}
+                    disabled={pending}
+                    onValueChange={(value) => {
+                      if (
+                        value === "add" ||
+                        value === "remove" ||
+                        value === "replace"
+                      ) {
+                        setMode(value)
+                        setValidationError("")
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        {nodeGroupModeItems.map((item) => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>{modeDescription}</FieldDescription>
+                </Field>
+                <FieldSet>
+                  <FieldLegend variant="label">选择分组</FieldLegend>
+                  {groups.length > 0 ? (
+                    <FieldGroup className="max-h-64 overflow-y-auto rounded-lg border p-3">
+                      {groups.map((group) => {
+                        const checkboxID = `batch-node-group-${group.id}`
+                        return (
+                          <Field key={group.id} orientation="horizontal">
+                            <Checkbox
+                              id={checkboxID}
+                              checked={groupIDs.includes(group.id)}
+                              disabled={pending}
+                              onCheckedChange={(checked) =>
+                                setGroup(group.id, checked)
+                              }
+                            />
+                            <FieldLabel
+                              htmlFor={checkboxID}
+                              className="font-normal"
+                            >
+                              {group.name}
+                            </FieldLabel>
+                          </Field>
+                        )
+                      })}
+                    </FieldGroup>
+                  ) : (
+                    <FieldDescription>
+                      暂无分组；使用“替换全部分组”可清空节点分组。
+                    </FieldDescription>
+                  )}
+                </FieldSet>
+              </>
+            )}
           </FieldGroup>
           {validationError || error ? (
             <Alert variant="destructive">
@@ -1184,7 +1250,14 @@ function BatchGroupDialog({
             >
               取消
             </Button>
-            <Button type="submit" disabled={pending || selectedCount === 0}>
+            <Button
+              type="submit"
+              disabled={
+                pending ||
+                selectedCount === 0 ||
+                (managed && groups.length === 0)
+              }
+            >
               {pending ? "保存中…" : "应用修改"}
             </Button>
           </DialogFooter>
@@ -1362,10 +1435,12 @@ function ShareHistoryList({
   shares,
   onView,
   onCopy,
+  onManage,
 }: {
   shares: Share[]
   onView: (share: Share) => void
   onCopy: (value: string) => void
+  onManage: (share: Share, action: "revoke" | "delete") => void
 }) {
   if (shares.length === 0) {
     return (
@@ -1398,23 +1473,28 @@ function ShareHistoryList({
                   {!share.permanent && share.expires_at
                     ? `，有效至 ${formatShareTime(share.expires_at)}`
                     : ""}
+                  {share.revoked_at
+                    ? `，撤销于 ${formatShareTime(share.revoked_at)}`
+                    : ""}
                 </CardDescription>
               </div>
               <div className="shrink-0">
                 <Badge
                   variant={
-                    share.expired
+                    share.revoked || share.expired
                       ? "destructive"
                       : share.permanent
                         ? "secondary"
                         : "outline"
                   }
                 >
-                  {share.expired
-                    ? "已过期"
-                    : share.permanent
-                      ? "永久"
-                      : "有效"}
+                  {share.revoked
+                    ? "已撤销"
+                    : share.expired
+                      ? "已过期"
+                      : share.permanent
+                        ? "永久"
+                        : "有效"}
                 </Badge>
               </div>
             </div>
@@ -1430,6 +1510,7 @@ function ShareHistoryList({
               <Button
                 variant="ghost"
                 size="icon-sm"
+                disabled={share.revoked || share.expired}
                 onClick={() => onCopy(share.url)}
               >
                 <CopyIcon />
@@ -1443,6 +1524,37 @@ function ShareHistoryList({
                 <QrCodeIcon />
                 <span className="sr-only">查看分享详情</span>
               </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={<Button variant="ghost" size="icon-sm" />}
+                >
+                  <MoreHorizontalIcon />
+                  <span className="sr-only">管理分享记录</span>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    {!share.revoked && !share.expired ? (
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={() => onManage(share, "revoke")}
+                      >
+                        <BanIcon />
+                        撤销分享
+                      </DropdownMenuItem>
+                    ) : null}
+                    {!share.revoked && !share.expired ? (
+                      <DropdownMenuSeparator />
+                    ) : null}
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => onManage(share, "delete")}
+                    >
+                      <Trash2Icon />
+                      删除记录
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </CardContent>
         </Card>
@@ -1982,8 +2094,9 @@ function NodeDialog({
     }
   }
 
+  const managedNode = draft.subscription_id != null
   const groupItems = [
-    { label: "不指定分组", value: "0" },
+    ...(managedNode ? [] : [{ label: "不指定分组", value: "0" }]),
     ...groups.map((group) => ({
       label: group.name,
       value: String(group.id),
@@ -2081,6 +2194,11 @@ function NodeDialog({
                     </SelectGroup>
                   </SelectContent>
                 </Select>
+                {managedNode ? (
+                  <FieldDescription>
+                    修改后会同步更新订阅目标分组，并迁移该订阅的全部节点。
+                  </FieldDescription>
+                ) : null}
               </Field>
             </FieldGroup>
 
@@ -2651,6 +2769,12 @@ function ShareDialog({
   const [expiresHours, setExpiresHours] = useState(720)
   const [generatedShare, setGeneratedShare] = useState<Share | null>(null)
   const [historyShare, setHistoryShare] = useState<Share | null>(null)
+  const [shareAction, setShareAction] = useState<{
+    share: Share
+    action: "revoke" | "delete"
+  } | null>(null)
+  const [managementPending, setManagementPending] = useState(false)
+  const [managementError, setManagementError] = useState("")
   const [error, setError] = useState("")
 
   async function generate() {
@@ -2675,141 +2799,245 @@ function ShareDialog({
   }
 
   async function copy(value: string) {
-    await navigator.clipboard.writeText(value)
+    setError("")
+    try {
+      await copyText(value)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "复制失败")
+    }
+  }
+
+  async function confirmShareAction() {
+    if (!shareAction) return
+    setManagementPending(true)
+    setManagementError("")
+    try {
+      if (shareAction.action === "revoke") {
+        await api(`/api/shares/${shareAction.share.id}/revoke`, {
+          method: "POST",
+        })
+      } else {
+        await api(`/api/shares/${shareAction.share.id}`, {
+          method: "DELETE",
+        })
+      }
+      await onGenerated()
+      if (historyShare?.id === shareAction.share.id) {
+        setHistoryShare(null)
+      }
+      setShareAction(null)
+    } catch (caught) {
+      setManagementError(
+        caught instanceof Error ? caught.message : "管理分享记录失败",
+      )
+    } finally {
+      setManagementPending(false)
+    }
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next)
-        if (!next) {
-          setActiveSection("create")
-          setShareMode("temporary")
-          setExpiresHours(720)
-          setGeneratedShare(null)
-          setHistoryShare(null)
-          setError("")
-        }
-      }}
-    >
-      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl">
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          onOpenChange(next)
+          if (!next) {
+            setActiveSection("create")
+            setShareMode("temporary")
+            setExpiresHours(720)
+            setGeneratedShare(null)
+            setHistoryShare(null)
+            setShareAction(null)
+            setError("")
+          }
+        }}
+      >
+        <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>分享 {target?.name ?? ""}</DialogTitle>
+            <DialogDescription>
+              在这里生成分享，并查看当前节点或分组的历史记录。
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs
+            value={activeSection}
+            onValueChange={(value) => {
+              if (value === "create" || value === "history") {
+                setActiveSection(value)
+                setError("")
+              }
+            }}
+          >
+            <TabsList>
+              <TabsTrigger value="create">新建分享</TabsTrigger>
+              <TabsTrigger value="history">
+                分享历史（{history.length}）
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="create" className="mt-4">
+              {generatedShare ? (
+                <div className="flex flex-col gap-4">
+                  <div className="flex justify-end">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setGeneratedShare(null)}
+                    >
+                      <Share2Icon data-icon="inline-start" />
+                      继续生成
+                    </Button>
+                  </div>
+                  <ShareDetails share={generatedShare} onCopy={copy} />
+                </div>
+              ) : (
+                <FieldGroup>
+                  <Field>
+                    <FieldLabel>分享类型</FieldLabel>
+                    <Select
+                      items={shareModeItems}
+                      value={shareMode}
+                      onValueChange={(value) => {
+                        if (value === "temporary" || value === "permanent") {
+                          setShareMode(value)
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {shareModeItems.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldDescription>
+                      永久分享不会自动过期；修改签名密钥仍会使链接失效。
+                    </FieldDescription>
+                  </Field>
+                  {shareMode === "temporary" ? (
+                    <Field>
+                      <FieldLabel htmlFor="share-hours">有效小时数</FieldLabel>
+                      <Input
+                        id="share-hours"
+                        type="number"
+                        min={1}
+                        max={8760}
+                        value={expiresHours}
+                        onChange={(event) =>
+                          setExpiresHours(Number(event.target.value))
+                        }
+                      />
+                    </Field>
+                  ) : null}
+                  <Button onClick={generate}>
+                    <Share2Icon data-icon="inline-start" />
+                    生成分享
+                  </Button>
+                </FieldGroup>
+              )}
+            </TabsContent>
+            <TabsContent value="history" className="mt-4">
+              {historyShare ? (
+                <div className="flex flex-col gap-4">
+                  <Button
+                    className="self-start"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setHistoryShare(null)}
+                  >
+                    <ArrowLeftIcon data-icon="inline-start" />
+                    返回历史
+                  </Button>
+                  <ShareDetails share={historyShare} onCopy={copy} />
+                </div>
+              ) : (
+                <ShareHistoryList
+                  shares={history}
+                  onView={setHistoryShare}
+                  onCopy={copy}
+                  onManage={(share, action) => {
+                    setManagementError("")
+                    setShareAction({ share, action })
+                  }}
+                />
+              )}
+            </TabsContent>
+          </Tabs>
+          {error ? (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+      <ShareManagementDialog
+        action={shareAction}
+        error={managementError}
+        pending={managementPending}
+        onOpenChange={(next) => {
+          if (!next && !managementPending) {
+            setShareAction(null)
+            setManagementError("")
+          }
+        }}
+        onConfirm={confirmShareAction}
+      />
+    </>
+  )
+}
+
+function ShareManagementDialog({
+  action,
+  error,
+  pending,
+  onOpenChange,
+  onConfirm,
+}: {
+  action: { share: Share; action: "revoke" | "delete" } | null
+  error: string
+  pending: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => Promise<void>
+}) {
+  const revoke = action?.action === "revoke"
+  return (
+    <Dialog open={action != null} onOpenChange={onOpenChange}>
+      <DialogContent>
         <DialogHeader>
-          <DialogTitle>分享 {target?.name ?? ""}</DialogTitle>
+          <DialogTitle>{revoke ? "撤销分享" : "删除分享记录"}</DialogTitle>
           <DialogDescription>
-            在这里生成分享，并查看当前节点或分组的历史记录。
+            {revoke
+              ? `撤销“${action?.share.target_name ?? ""}”的分享后，URL 会立即失效，且无法恢复。`
+              : `删除“${action?.share.target_name ?? ""}”的历史记录后，URL 也会失效，且无法恢复。`}
           </DialogDescription>
         </DialogHeader>
-        <Tabs
-          value={activeSection}
-          onValueChange={(value) => {
-            if (value === "create" || value === "history") {
-              setActiveSection(value)
-              setError("")
-            }
-          }}
-        >
-          <TabsList>
-            <TabsTrigger value="create">新建分享</TabsTrigger>
-            <TabsTrigger value="history">
-              分享历史（{history.length}）
-            </TabsTrigger>
-          </TabsList>
-          <TabsContent value="create" className="mt-4">
-            {generatedShare ? (
-              <div className="flex flex-col gap-4">
-                <div className="flex justify-end">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setGeneratedShare(null)}
-                  >
-                    <Share2Icon data-icon="inline-start" />
-                    继续生成
-                  </Button>
-                </div>
-                <ShareDetails share={generatedShare} onCopy={copy} />
-              </div>
-            ) : (
-              <FieldGroup>
-                <Field>
-                  <FieldLabel>分享类型</FieldLabel>
-                  <Select
-                    items={shareModeItems}
-                    value={shareMode}
-                    onValueChange={(value) => {
-                      if (value === "temporary" || value === "permanent") {
-                        setShareMode(value)
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent alignItemWithTrigger={false}>
-                      <SelectGroup>
-                        {shareModeItems.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldDescription>
-                    永久分享不会自动过期；修改签名密钥仍会使链接失效。
-                  </FieldDescription>
-                </Field>
-                {shareMode === "temporary" ? (
-                  <Field>
-                    <FieldLabel htmlFor="share-hours">有效小时数</FieldLabel>
-                    <Input
-                      id="share-hours"
-                      type="number"
-                      min={1}
-                      max={8760}
-                      value={expiresHours}
-                      onChange={(event) =>
-                        setExpiresHours(Number(event.target.value))
-                      }
-                    />
-                  </Field>
-                ) : null}
-                <Button onClick={generate}>
-                  <Share2Icon data-icon="inline-start" />
-                  生成分享
-                </Button>
-              </FieldGroup>
-            )}
-          </TabsContent>
-          <TabsContent value="history" className="mt-4">
-            {historyShare ? (
-              <div className="flex flex-col gap-4">
-                <Button
-                  className="self-start"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setHistoryShare(null)}
-                >
-                  <ArrowLeftIcon data-icon="inline-start" />
-                  返回历史
-                </Button>
-                <ShareDetails share={historyShare} onCopy={copy} />
-              </div>
-            ) : (
-              <ShareHistoryList
-                shares={history}
-                onView={setHistoryShare}
-                onCopy={copy}
-              />
-            )}
-          </TabsContent>
-        </Tabs>
         {error ? (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : null}
+        <DialogFooter>
+          <Button
+            variant="outline"
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            取消
+          </Button>
+          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+            {revoke ? (
+              <BanIcon data-icon="inline-start" />
+            ) : (
+              <Trash2Icon data-icon="inline-start" />
+            )}
+            {pending ? "处理中…" : revoke ? "确认撤销" : "确认删除"}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -2828,18 +3056,41 @@ function ShareDetails({
         <Badge variant="outline">
           {share.kind === "node" ? "节点" : "分组"}
         </Badge>
-        <Badge variant={share.permanent ? "secondary" : "outline"}>
-          {share.expired
-            ? "已过期"
-            : share.permanent
-              ? "永久有效"
-              : `有效至 ${formatShareTime(share.expires_at ?? "")}`}
+        <Badge
+          variant={
+            share.revoked || share.expired
+              ? "destructive"
+              : share.permanent
+                ? "secondary"
+                : "outline"
+          }
+        >
+          {share.revoked
+            ? "已撤销"
+            : share.expired
+              ? "已过期"
+              : share.permanent
+                ? "永久有效"
+                : `有效至 ${formatShareTime(share.expires_at ?? "")}`}
         </Badge>
         <span className="text-sm text-muted-foreground">
           {share.target_name} · 创建于 {formatShareTime(share.created_at)}
         </span>
       </div>
-      <ShareURL label="分享 URL" value={share.url} onCopy={onCopy} />
+      {share.revoked ? (
+        <Alert variant="destructive">
+          <AlertTitle>分享已撤销</AlertTitle>
+          <AlertDescription>
+            此 URL 已无法访问，历史记录仅用于查看。
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <ShareURL
+        label="分享 URL"
+        value={share.url}
+        disabled={share.revoked || share.expired}
+        onCopy={onCopy}
+      />
       <Separator />
       <div className="flex flex-wrap gap-4">
         <Card className="min-w-64 flex-1">
@@ -2882,10 +3133,12 @@ function ShareDetails({
 function ShareURL({
   label,
   value,
+  disabled = false,
   onCopy,
 }: {
   label: string
   value: string
+  disabled?: boolean
   onCopy: (value: string) => void
 }) {
   return (
@@ -2897,7 +3150,12 @@ function ShareURL({
           value={value}
           className="min-w-0 flex-1 font-mono text-xs"
         />
-        <Button variant="outline" size="icon" onClick={() => onCopy(value)}>
+        <Button
+          variant="outline"
+          size="icon"
+          disabled={disabled}
+          onClick={() => onCopy(value)}
+        >
           <CopyIcon />
           <span className="sr-only">复制</span>
         </Button>

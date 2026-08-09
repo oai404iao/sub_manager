@@ -28,7 +28,7 @@ var (
 	ErrGroupCycle           = errors.New("group hierarchy cycle")
 	ErrGroupNotFound        = errors.New("group not found")
 	ErrNodeNotFound         = errors.New("node not found")
-	ErrManagedNodeGroups    = errors.New("subscription-managed node groups cannot be changed")
+	ErrManagedNodeGroupMode = errors.New("subscription-managed nodes require one replacement group")
 	ErrInvalidNodeGroupMode = errors.New("invalid node group update mode")
 )
 
@@ -64,7 +64,7 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	username TEXT NOT NULL UNIQUE,
@@ -124,11 +124,76 @@ CREATE TABLE IF NOT EXISTS shares (
 	target_id INTEGER NOT NULL,
 	target_name TEXT NOT NULL,
 	url TEXT NOT NULL,
+	token_hash TEXT NOT NULL DEFAULT '',
 	expires_at DATETIME,
+	revoked_at DATETIME,
+	deleted_at DATETIME,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_shares_created ON shares(created_at DESC, id DESC);
+`); err != nil {
+		return err
+	}
+	for _, migration := range []struct {
+		column     string
+		definition string
+	}{
+		{column: "token_hash", definition: "TEXT NOT NULL DEFAULT ''"},
+		{column: "revoked_at", definition: "DATETIME"},
+		{column: "deleted_at", definition: "DATETIME"},
+	} {
+		if err := s.ensureSharesColumn(migration.column, migration.definition); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token_hash
+ON shares(token_hash) WHERE token_hash <> '';
 `)
+	return err
+}
+
+func (s *Store) ensureSharesColumn(column, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(shares)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var (
+			index        int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(
+			&index,
+			&name,
+			&columnType,
+			&notNull,
+			&defaultValue,
+			&primaryKey,
+		); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE shares ADD COLUMN ` + column + ` ` + definition)
 	return err
 }
 
@@ -484,24 +549,52 @@ WHERE id IN (%s)`, placeholders(len(ids))), int64Args(ids)...)
 }
 
 func (s *Store) SaveNode(ctx context.Context, node model.Node) (model.Node, error) {
-	data, err := json.Marshal(node)
-	if err != nil {
-		return model.Node{}, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.Node{}, err
 	}
 	defer tx.Rollback()
 	if node.ID == 0 {
+		node.SubscriptionID = nil
+		data, err := json.Marshal(node)
+		if err != nil {
+			return model.Node{}, err
+		}
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO nodes(name, protocol, server, port, config_json, subscription_id)
-VALUES (?, ?, ?, ?, ?, ?)`, node.Name, node.Protocol, node.Server, node.Port, string(data), node.SubscriptionID)
+VALUES (?, ?, ?, ?, ?, NULL)`, node.Name, node.Protocol, node.Server, node.Port, string(data))
 		if err != nil {
 			return model.Node{}, err
 		}
 		node.ID, _ = result.LastInsertId()
+		if err := replaceNodeGroupsTx(ctx, tx, []int64{node.ID}, node.GroupIDs); err != nil {
+			return model.Node{}, err
+		}
 	} else {
+		var existingSubscriptionID sql.NullInt64
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT subscription_id FROM nodes WHERE id = ?`,
+			node.ID,
+		).Scan(&existingSubscriptionID); err != nil {
+			return model.Node{}, err
+		}
+		if existingSubscriptionID.Valid {
+			subscriptionID := existingSubscriptionID.Int64
+			node.SubscriptionID = &subscriptionID
+			if len(node.GroupIDs) != 1 {
+				return model.Node{}, ErrManagedNodeGroupMode
+			}
+			if err := ensureGroupTx(ctx, tx, node.GroupIDs[0]); err != nil {
+				return model.Node{}, err
+			}
+		} else {
+			node.SubscriptionID = nil
+		}
+		data, err := json.Marshal(node)
+		if err != nil {
+			return model.Node{}, err
+		}
 		result, err := tx.ExecContext(ctx, `
 UPDATE nodes SET name=?, protocol=?, server=?, port=?, config_json=?,
 	subscription_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
@@ -513,13 +606,21 @@ UPDATE nodes SET name=?, protocol=?, server=?, port=?, config_json=?,
 		if affected == 0 {
 			return model.Node{}, sql.ErrNoRows
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM node_groups WHERE node_id = ?`, node.ID); err != nil {
-			return model.Node{}, err
-		}
-	}
-	for _, groupID := range node.GroupIDs {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO node_groups(node_id, group_id) VALUES (?, ?)`,
-			node.ID, groupID); err != nil {
+		if existingSubscriptionID.Valid {
+			if _, err := moveSubscriptionsToGroupTx(
+				ctx,
+				tx,
+				[]int64{existingSubscriptionID.Int64},
+				node.GroupIDs[0],
+			); err != nil {
+				return model.Node{}, err
+			}
+		} else if err := replaceNodeGroupsTx(
+			ctx,
+			tx,
+			[]int64{node.ID},
+			node.GroupIDs,
+		); err != nil {
 			return model.Node{}, err
 		}
 	}
@@ -585,38 +686,60 @@ func (s *Store) UpdateNodeGroups(
 	nodeIDs []int64,
 	groupIDs []int64,
 	mode string,
-) (int, error) {
+) (int, int, error) {
 	switch mode {
 	case NodeGroupModeAdd, NodeGroupModeRemove, NodeGroupModeReplace:
 	default:
-		return 0, ErrInvalidNodeGroupMode
+		return 0, 0, ErrInvalidNodeGroupMode
 	}
 	if len(nodeIDs) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
 
-	var nodeCount, managedCount int
-	if err := tx.QueryRowContext(
+	rows, err := tx.QueryContext(
 		ctx,
 		fmt.Sprintf(`
-SELECT COUNT(*),
-	COALESCE(SUM(CASE WHEN subscription_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+SELECT id, subscription_id
 FROM nodes
 WHERE id IN (%s)`, placeholders(len(nodeIDs))),
 		int64Args(nodeIDs)...,
-	).Scan(&nodeCount, &managedCount); err != nil {
-		return 0, err
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	nodeCount := 0
+	manualNodeIDs := make([]int64, 0, len(nodeIDs))
+	subscriptionSet := make(map[int64]struct{})
+	for rows.Next() {
+		var (
+			nodeID         int64
+			subscriptionID sql.NullInt64
+		)
+		if err := rows.Scan(&nodeID, &subscriptionID); err != nil {
+			_ = rows.Close()
+			return 0, 0, err
+		}
+		nodeCount++
+		if subscriptionID.Valid {
+			subscriptionSet[subscriptionID.Int64] = struct{}{}
+		} else {
+			manualNodeIDs = append(manualNodeIDs, nodeID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, err
 	}
 	if nodeCount != len(nodeIDs) {
-		return 0, ErrNodeNotFound
-	}
-	if managedCount > 0 {
-		return 0, ErrManagedNodeGroups
+		return 0, 0, ErrNodeNotFound
 	}
 	if len(groupIDs) > 0 {
 		var groupCount int
@@ -625,11 +748,52 @@ WHERE id IN (%s)`, placeholders(len(nodeIDs))),
 			fmt.Sprintf(`SELECT COUNT(*) FROM groups WHERE id IN (%s)`, placeholders(len(groupIDs))),
 			int64Args(groupIDs)...,
 		).Scan(&groupCount); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if groupCount != len(groupIDs) {
-			return 0, ErrGroupNotFound
+			return 0, 0, ErrGroupNotFound
 		}
+	}
+
+	subscriptionIDs := make([]int64, 0, len(subscriptionSet))
+	for subscriptionID := range subscriptionSet {
+		subscriptionIDs = append(subscriptionIDs, subscriptionID)
+	}
+	sort.Slice(subscriptionIDs, func(left, right int) bool {
+		return subscriptionIDs[left] < subscriptionIDs[right]
+	})
+	if len(subscriptionIDs) > 0 {
+		if mode != NodeGroupModeReplace || len(groupIDs) != 1 {
+			return 0, 0, ErrManagedNodeGroupMode
+		}
+		managedNodes, err := moveSubscriptionsToGroupTx(
+			ctx,
+			tx,
+			subscriptionIDs,
+			groupIDs[0],
+		)
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := replaceNodeGroupsTx(ctx, tx, manualNodeIDs, groupIDs); err != nil {
+			return 0, 0, err
+		}
+		if len(manualNodeIDs) > 0 {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf(
+					`UPDATE nodes SET updated_at=CURRENT_TIMESTAMP WHERE id IN (%s)`,
+					placeholders(len(manualNodeIDs)),
+				),
+				int64Args(manualNodeIDs)...,
+			); err != nil {
+				return 0, 0, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, 0, err
+		}
+		return managedNodes + len(manualNodeIDs), len(subscriptionIDs), nil
 	}
 
 	switch mode {
@@ -642,7 +806,7 @@ WHERE id IN (%s)`, placeholders(len(nodeIDs))),
 					nodeID,
 					groupID,
 				); err != nil {
-					return 0, err
+					return 0, 0, err
 				}
 			}
 		}
@@ -659,28 +823,12 @@ WHERE node_id IN (%s) AND group_id IN (%s)`,
 				),
 				args...,
 			); err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 		}
 	case NodeGroupModeReplace:
-		if _, err := tx.ExecContext(
-			ctx,
-			fmt.Sprintf(`DELETE FROM node_groups WHERE node_id IN (%s)`, placeholders(len(nodeIDs))),
-			int64Args(nodeIDs)...,
-		); err != nil {
-			return 0, err
-		}
-		for _, nodeID := range nodeIDs {
-			for _, groupID := range groupIDs {
-				if _, err := tx.ExecContext(
-					ctx,
-					`INSERT INTO node_groups(node_id, group_id) VALUES (?, ?)`,
-					nodeID,
-					groupID,
-				); err != nil {
-					return 0, err
-				}
-			}
+		if err := replaceNodeGroupsTx(ctx, tx, nodeIDs, groupIDs); err != nil {
+			return 0, 0, err
 		}
 	}
 	if _, err := tx.ExecContext(
@@ -688,9 +836,134 @@ WHERE node_id IN (%s) AND group_id IN (%s)`,
 		fmt.Sprintf(`UPDATE nodes SET updated_at=CURRENT_TIMESTAMP WHERE id IN (%s)`, placeholders(len(nodeIDs))),
 		int64Args(nodeIDs)...,
 	); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return nodeCount, 0, nil
+}
+
+func ensureGroupTx(ctx context.Context, tx *sql.Tx, groupID int64) error {
+	var exists int
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT 1 FROM groups WHERE id = ?`,
+		groupID,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrGroupNotFound
+	}
+	return err
+}
+
+func replaceNodeGroupsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	nodeIDs []int64,
+	groupIDs []int64,
+) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`DELETE FROM node_groups WHERE node_id IN (%s)`, placeholders(len(nodeIDs))),
+		int64Args(nodeIDs)...,
+	); err != nil {
+		return err
+	}
+	for _, nodeID := range nodeIDs {
+		for _, groupID := range groupIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				`INSERT INTO node_groups(node_id, group_id) VALUES (?, ?)`,
+				nodeID,
+				groupID,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func moveSubscriptionsToGroupTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	subscriptionIDs []int64,
+	groupID int64,
+) (int, error) {
+	if len(subscriptionIDs) == 0 {
+		return 0, nil
+	}
+	if err := ensureGroupTx(ctx, tx, groupID); err != nil {
+		return 0, err
+	}
+	var subscriptionCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			`SELECT COUNT(*) FROM subscriptions WHERE id IN (%s)`,
+			placeholders(len(subscriptionIDs)),
+		),
+		int64Args(subscriptionIDs)...,
+	).Scan(&subscriptionCount); err != nil {
+		return 0, err
+	}
+	if subscriptionCount != len(subscriptionIDs) {
+		return 0, sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			`UPDATE subscriptions SET group_id = ? WHERE id IN (%s)`,
+			placeholders(len(subscriptionIDs)),
+		),
+		append([]any{groupID}, int64Args(subscriptionIDs)...)...,
+	); err != nil {
+		return 0, err
+	}
+	var nodeCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			`SELECT COUNT(*) FROM nodes WHERE subscription_id IN (%s)`,
+			placeholders(len(subscriptionIDs)),
+		),
+		int64Args(subscriptionIDs)...,
+	).Scan(&nodeCount); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`
+DELETE FROM node_groups
+WHERE node_id IN (
+	SELECT id FROM nodes WHERE subscription_id IN (%s)
+)`, placeholders(len(subscriptionIDs))),
+		int64Args(subscriptionIDs)...,
+	); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`
+INSERT INTO node_groups(node_id, group_id)
+SELECT id, ? FROM nodes WHERE subscription_id IN (%s)`,
+			placeholders(len(subscriptionIDs)),
+		),
+		append([]any{groupID}, int64Args(subscriptionIDs)...)...,
+	); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`
+UPDATE nodes SET updated_at=CURRENT_TIMESTAMP
+WHERE subscription_id IN (%s)`, placeholders(len(subscriptionIDs))),
+		int64Args(subscriptionIDs)...,
+	); err != nil {
 		return 0, err
 	}
 	return nodeCount, nil
@@ -968,9 +1241,9 @@ func (s *Store) CreateShare(ctx context.Context, item model.Share) (model.Share,
 		expiresAt = item.ExpiresAt.UTC()
 	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO shares(kind, target_id, target_name, url, expires_at)
-VALUES (?, ?, ?, ?, ?)`,
-		item.Kind, item.TargetID, item.TargetName, item.URL, expiresAt)
+INSERT INTO shares(kind, target_id, target_name, url, token_hash, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		item.Kind, item.TargetID, item.TargetName, item.URL, item.TokenHash, expiresAt)
 	if err != nil {
 		return model.Share{}, err
 	}
@@ -983,8 +1256,11 @@ VALUES (?, ?, ?, ?, ?)`,
 
 func (s *Store) Shares(ctx context.Context) ([]model.Share, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, kind, target_id, target_name, url, expires_at, created_at
-FROM shares ORDER BY created_at DESC, id DESC`)
+SELECT id, kind, target_id, target_name, url, token_hash, expires_at,
+	revoked_at, deleted_at, created_at
+FROM shares
+WHERE deleted_at IS NULL
+ORDER BY created_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1003,8 +1279,79 @@ FROM shares ORDER BY created_at DESC, id DESC`)
 
 func (s *Store) Share(ctx context.Context, id int64) (model.Share, error) {
 	return scanShare(s.db.QueryRowContext(ctx, `
-SELECT id, kind, target_id, target_name, url, expires_at, created_at
-FROM shares WHERE id = ?`, id))
+SELECT id, kind, target_id, target_name, url, token_hash, expires_at,
+	revoked_at, deleted_at, created_at
+FROM shares WHERE id = ? AND deleted_at IS NULL`, id))
+}
+
+func (s *Store) ShareByTokenHash(ctx context.Context, tokenHash string) (model.Share, error) {
+	return scanShare(s.db.QueryRowContext(ctx, `
+SELECT id, kind, target_id, target_name, url, token_hash, expires_at,
+	revoked_at, deleted_at, created_at
+FROM shares WHERE token_hash = ?`, tokenHash))
+}
+
+func (s *Store) LegacySharesForTarget(
+	ctx context.Context,
+	kind string,
+	targetID int64,
+) ([]model.Share, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, kind, target_id, target_name, url, token_hash, expires_at,
+	revoked_at, deleted_at, created_at
+FROM shares
+WHERE token_hash = '' AND kind = ? AND target_id = ?
+ORDER BY id DESC`, kind, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []model.Share{}
+	for rows.Next() {
+		item, err := scanShare(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RevokeShare(ctx context.Context, id int64) (model.Share, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE shares
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE id = ? AND deleted_at IS NULL`, id)
+	if err != nil {
+		return model.Share{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.Share{}, err
+	}
+	if affected == 0 {
+		return model.Share{}, sql.ErrNoRows
+	}
+	return s.Share(ctx, id)
+}
+
+func (s *Store) DeleteShare(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE shares
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+	deleted_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 type scanner interface {
@@ -1013,22 +1360,38 @@ type scanner interface {
 
 func scanShare(row scanner) (model.Share, error) {
 	var item model.Share
-	var expiresAt sql.NullTime
+	var (
+		tokenHash string
+		expiresAt sql.NullTime
+		revokedAt sql.NullTime
+		deletedAt sql.NullTime
+	)
 	if err := row.Scan(
 		&item.ID,
 		&item.Kind,
 		&item.TargetID,
 		&item.TargetName,
 		&item.URL,
+		&tokenHash,
 		&expiresAt,
+		&revokedAt,
+		&deletedAt,
 		&item.CreatedAt,
 	); err != nil {
 		return model.Share{}, err
 	}
+	item.TokenHash = tokenHash
 	if expiresAt.Valid {
 		item.ExpiresAt = &expiresAt.Time
 	} else {
 		item.Permanent = true
+	}
+	if revokedAt.Valid {
+		item.Revoked = true
+		item.RevokedAt = &revokedAt.Time
+	}
+	if deletedAt.Valid {
+		item.DeletedAt = &deletedAt.Time
 	}
 	return item, nil
 }

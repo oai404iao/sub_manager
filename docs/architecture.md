@@ -52,7 +52,8 @@
   `xray_outbound`，用于无损往返当前 Xray 配置。
 - `node_groups`：节点与分组多对多关系。
 - `subscriptions`：上游 URL、目标分组、刷新状态。
-- `shares`：节点/分组分享历史、目标名称快照、签名 URL 与可选到期时间。
+- `shares`：节点/分组分享历史、目标名称快照、签名 URL、撤销 token 摘要、可选
+  到期时间，以及撤销/删除时间。删除采用隐藏记录加撤销墓碑，确保 URL 不会重新生效。
 
 ## API 边界
 
@@ -61,14 +62,17 @@
 - `/api/nodes`、`/api/subscriptions`：节点与订阅 CRUD；订阅刷新时原子替换其托管节点。
 - `/api/groups`：分组创建、编辑、删除与下级分组组织。
 - `DELETE /api/nodes`：在事务中批量删除所选节点。
-- `PATCH /api/nodes/groups`：批量添加、移出或替换手工节点的直接分组；订阅托管节点
-  的分组仍由订阅目标分组控制。
+- `PATCH /api/nodes/groups`：批量添加、移出或替换手工节点的直接分组；所选节点
+  包含订阅托管节点时，只接受一个目标分组，并原子迁移相关订阅及其全部节点。
 - `POST /api/nodes/export`：按请求顺序导出多行 URI 或标准 Base64 订阅内容。
 - `/api/nodes/import`：解析 Xray/Mihomo YAML、JSON、URI 和 Base64 内容。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
 - `/api/shares`：生成并记录单一签名订阅 URL；支持限时与永久分享。分组仅返回
   URL 二维码，单节点额外返回节点 URI 二维码。分组分享通过递归查询聚合并去重
   当前分组及全部下级分组的节点。
+- `POST /api/shares/{id}/revoke`、`DELETE /api/shares/{id}`：撤销分享或删除历史；
+  两种操作都会使对应 URL 立即失效。旧版已记录 URL 仍可通过查询参数匹配撤销，
+  未记录的旧版签名 URL 保持兼容。
 - `/api/version`：无需鉴权的构建版本信息。
 - `/healthz`：无需鉴权的容器健康检查。
 - `/s?...`：无需登录、验证签名后输出订阅或节点内容。

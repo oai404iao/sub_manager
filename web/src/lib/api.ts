@@ -66,6 +66,11 @@ export type NodeExportResult = {
 
 export type NodeGroupUpdateMode = "add" | "remove" | "replace"
 
+export type NodeGroupUpdateResult = {
+  updated: number
+  subscriptions: number
+}
+
 export type Subscription = {
   id: number
   name: string
@@ -87,6 +92,8 @@ export type Share = {
   qr_uri_url?: string
   permanent: boolean
   expired: boolean
+  revoked: boolean
+  revoked_at?: string
   expires_at: string | null
   created_at: string
 }

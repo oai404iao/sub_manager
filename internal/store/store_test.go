@@ -363,13 +363,18 @@ func TestBatchNodeOperations(t *testing.T) {
 	}
 
 	nodeIDs := []int64{firstNode.ID, secondNode.ID}
-	if updated, err := database.UpdateNodeGroups(
+	if updated, subscriptions, err := database.UpdateNodeGroups(
 		ctx,
 		nodeIDs,
 		[]int64{secondGroup.ID},
 		NodeGroupModeAdd,
-	); err != nil || updated != 2 {
-		t.Fatalf("add groups updated=%d err=%v", updated, err)
+	); err != nil || updated != 2 || subscriptions != 0 {
+		t.Fatalf(
+			"add groups updated=%d subscriptions=%d err=%v",
+			updated,
+			subscriptions,
+			err,
+		)
 	}
 	for _, nodeID := range nodeIDs {
 		node, err := database.Node(ctx, nodeID)
@@ -383,13 +388,18 @@ func TestBatchNodeOperations(t *testing.T) {
 		}
 	}
 
-	if updated, err := database.UpdateNodeGroups(
+	if updated, subscriptions, err := database.UpdateNodeGroups(
 		ctx,
 		nodeIDs,
 		[]int64{firstGroup.ID},
 		NodeGroupModeRemove,
-	); err != nil || updated != 2 {
-		t.Fatalf("remove groups updated=%d err=%v", updated, err)
+	); err != nil || updated != 2 || subscriptions != 0 {
+		t.Fatalf(
+			"remove groups updated=%d subscriptions=%d err=%v",
+			updated,
+			subscriptions,
+			err,
+		)
 	}
 	for _, nodeID := range nodeIDs {
 		node, err := database.Node(ctx, nodeID)
@@ -401,13 +411,18 @@ func TestBatchNodeOperations(t *testing.T) {
 		}
 	}
 
-	if updated, err := database.UpdateNodeGroups(
+	if updated, subscriptions, err := database.UpdateNodeGroups(
 		ctx,
 		nodeIDs,
 		nil,
 		NodeGroupModeReplace,
-	); err != nil || updated != 2 {
-		t.Fatalf("replace groups updated=%d err=%v", updated, err)
+	); err != nil || updated != 2 || subscriptions != 0 {
+		t.Fatalf(
+			"replace groups updated=%d subscriptions=%d err=%v",
+			updated,
+			subscriptions,
+			err,
+		)
 	}
 	for _, nodeID := range nodeIDs {
 		node, err := database.Node(ctx, nodeID)
@@ -432,12 +447,20 @@ func TestBatchNodeOperations(t *testing.T) {
 		ctx,
 		subscription.ID,
 		firstGroup.ID,
-		[]model.Node{{
-			Name:     "managed",
-			Protocol: "socks5",
-			Server:   "managed.example.com",
-			Port:     1080,
-		}},
+		[]model.Node{
+			{
+				Name:     "managed one",
+				Protocol: "socks5",
+				Server:   "managed-one.example.com",
+				Port:     1080,
+			},
+			{
+				Name:     "managed two",
+				Protocol: "socks5",
+				Server:   "managed-two.example.com",
+				Port:     1080,
+			},
+		},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -445,23 +468,88 @@ func TestBatchNodeOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var managedNode model.Node
+	managedNodes := []model.Node{}
 	for _, node := range nodes {
 		if node.SubscriptionID != nil {
-			managedNode = node
-			break
+			managedNodes = append(managedNodes, node)
 		}
 	}
-	if managedNode.ID == 0 {
-		t.Fatal("managed node was not created")
+	if len(managedNodes) != 2 {
+		t.Fatalf("managed nodes = %d, want 2", len(managedNodes))
 	}
-	if _, err := database.UpdateNodeGroups(
+	if _, _, err := database.UpdateNodeGroups(
 		ctx,
-		[]int64{managedNode.ID},
+		[]int64{managedNodes[0].ID},
 		[]int64{secondGroup.ID},
 		NodeGroupModeAdd,
-	); !errors.Is(err, ErrManagedNodeGroups) {
-		t.Fatalf("managed node group error = %v, want %v", err, ErrManagedNodeGroups)
+	); !errors.Is(err, ErrManagedNodeGroupMode) {
+		t.Fatalf(
+			"managed node group error = %v, want %v",
+			err,
+			ErrManagedNodeGroupMode,
+		)
+	}
+	if updated, subscriptions, err := database.UpdateNodeGroups(
+		ctx,
+		[]int64{managedNodes[0].ID, firstNode.ID},
+		[]int64{secondGroup.ID},
+		NodeGroupModeReplace,
+	); err != nil || updated != 3 || subscriptions != 1 {
+		t.Fatalf(
+			"managed replace updated=%d subscriptions=%d err=%v",
+			updated,
+			subscriptions,
+			err,
+		)
+	}
+	subscription, err = database.Subscription(ctx, subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subscription.GroupID != secondGroup.ID {
+		t.Fatalf("subscription group = %d, want %d", subscription.GroupID, secondGroup.ID)
+	}
+	for _, managedNode := range managedNodes {
+		node, err := database.Node(ctx, managedNode.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != secondGroup.ID {
+			t.Fatalf("managed node was not moved: %#v", node.GroupIDs)
+		}
+	}
+	firstNode, err = database.Node(ctx, firstNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstNode.GroupIDs) != 1 || firstNode.GroupIDs[0] != secondGroup.ID {
+		t.Fatalf("manual node was not replaced: %#v", firstNode.GroupIDs)
+	}
+
+	managedNodes[0].Name = "managed edited"
+	managedNodes[0].GroupIDs = []int64{firstGroup.ID}
+	savedManagedNode, err := database.SaveNode(ctx, managedNodes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveNode(ctx, savedManagedNode); err != nil {
+		t.Fatalf("saving an unchanged managed group failed: %v", err)
+	}
+	subscription, err = database.Subscription(ctx, subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subscription.GroupID != firstGroup.ID {
+		t.Fatalf("edited subscription group = %d, want %d", subscription.GroupID, firstGroup.ID)
+	}
+	for _, managedNode := range managedNodes {
+		node, err := database.Node(ctx, managedNode.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != firstGroup.ID {
+			t.Fatalf("edited managed node was not moved: %#v", node.GroupIDs)
+		}
 	}
 
 	if _, err := database.DeleteNodes(
@@ -500,6 +588,7 @@ func TestShareHistory(t *testing.T) {
 		TargetID:   1,
 		TargetName: "temporary",
 		URL:        "https://share.example/s?temporary",
+		TokenHash:  "temporary-token-hash",
 		ExpiresAt:  &expiresAt,
 	})
 	if err != nil {
@@ -510,6 +599,7 @@ func TestShareHistory(t *testing.T) {
 		TargetID:   2,
 		TargetName: "permanent",
 		URL:        "https://share.example/s?permanent",
+		TokenHash:  "permanent-token-hash",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -532,6 +622,87 @@ func TestShareHistory(t *testing.T) {
 	}
 	if state.Shares[0].ID != permanent.ID || state.Shares[1].ID != temporary.ID {
 		t.Fatalf("shares are not newest first: %#v", state.Shares)
+	}
+
+	temporary, err = database.RevokeShare(ctx, temporary.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !temporary.Revoked || temporary.RevokedAt == nil {
+		t.Fatalf("share was not revoked: %#v", temporary)
+	}
+	if err := database.DeleteShare(ctx, permanent.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := database.ShareByTokenHash(ctx, "permanent-token-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted.Revoked || deleted.DeletedAt == nil {
+		t.Fatalf("deleted share did not retain revocation tombstone: %#v", deleted)
+	}
+	state, err = database.State(ctx, model.User{ID: 1, Username: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Shares) != 1 || state.Shares[0].ID != temporary.ID ||
+		!state.Shares[0].Revoked {
+		t.Fatalf("unexpected managed share history: %#v", state.Shares)
+	}
+}
+
+func TestOpenMigratesExistingDatabaseForShareManagement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-shares.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+CREATE TABLE shares (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind TEXT NOT NULL CHECK(kind IN ('node', 'group')),
+	target_id INTEGER NOT NULL,
+	target_name TEXT NOT NULL,
+	url TEXT NOT NULL,
+	expires_at DATETIME,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO shares(kind, target_id, target_name, url)
+VALUES ('node', 1, 'legacy', 'https://share.example/s?legacy');
+`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(path, "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	shares, err := database.Shares(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shares) != 1 || shares[0].TokenHash != "" || shares[0].Revoked {
+		t.Fatalf("unexpected migrated share: %#v", shares)
+	}
+	if _, err := database.RevokeShare(ctx, shares[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteShare(ctx, shares[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	shares, err = database.Shares(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shares) != 0 {
+		t.Fatalf("deleted migrated share is still listed: %#v", shares)
 	}
 }
 

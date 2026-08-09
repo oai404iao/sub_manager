@@ -78,6 +78,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/subscriptions/{id}/refresh", s.refreshSubscription)
 	api.HandleFunc("DELETE /api/subscriptions/{id}", s.deleteSubscription)
 	api.HandleFunc("POST /api/shares", s.createShare)
+	api.HandleFunc("POST /api/shares/{id}/revoke", s.revokeShare)
+	api.HandleFunc("DELETE /api/shares/{id}", s.deleteShare)
 	api.HandleFunc("GET /api/qr", s.qr)
 	root.Handle("/api/", s.requireAuth(api))
 
@@ -263,7 +265,17 @@ func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved, err := s.store.SaveNode(r.Context(), node)
-	if err != nil {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "节点或订阅不存在")
+		return
+	case errors.Is(err, store.ErrGroupNotFound):
+		writeError(w, http.StatusBadRequest, "分组不存在")
+		return
+	case errors.Is(err, store.ErrManagedNodeGroupMode):
+		writeError(w, http.StatusBadRequest, "订阅托管节点必须选择一个目标分组")
+		return
+	case err != nil:
 		serverError(w, err)
 		return
 	}
@@ -389,7 +401,12 @@ func (s *Server) updateNodeGroups(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "单次分组关系修改过多")
 		return
 	}
-	updated, err := s.store.UpdateNodeGroups(r.Context(), nodeIDs, groupIDs, mode)
+	updated, subscriptions, err := s.store.UpdateNodeGroups(
+		r.Context(),
+		nodeIDs,
+		groupIDs,
+		mode,
+	)
 	switch {
 	case errors.Is(err, store.ErrNodeNotFound):
 		writeError(w, http.StatusNotFound, "部分节点不存在，请刷新后重试")
@@ -397,14 +414,17 @@ func (s *Server) updateNodeGroups(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrGroupNotFound):
 		writeError(w, http.StatusNotFound, "部分分组不存在，请刷新后重试")
 		return
-	case errors.Is(err, store.ErrManagedNodeGroups):
-		writeError(w, http.StatusBadRequest, "订阅托管节点的分组由订阅决定，请修改订阅目标分组")
+	case errors.Is(err, store.ErrManagedNodeGroupMode):
+		writeError(w, http.StatusBadRequest, "包含订阅托管节点时，只能选择一个目标分组并整条订阅迁移")
 		return
 	case err != nil:
 		serverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"updated": updated})
+	writeJSON(w, http.StatusOK, map[string]int{
+		"updated":       updated,
+		"subscriptions": subscriptions,
+	})
 }
 
 func (s *Server) deleteNodes(w http.ResponseWriter, r *http.Request) {
@@ -621,11 +641,17 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &expires
 		exp = expires.Unix()
 	}
+	shareToken, tokenHash, err := auth.NewToken()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
 	item, err := s.store.CreateShare(r.Context(), model.Share{
 		Kind:       request.Kind,
 		TargetID:   request.ID,
 		TargetName: targetName,
-		URL:        s.signedURL(request.Kind, request.ID, "subscription", exp),
+		URL:        s.managedSignedURL(shareToken, request.Kind, request.ID, "subscription", exp),
+		TokenHash:  tokenHash,
 		ExpiresAt:  expiresAt,
 	})
 	if err != nil {
@@ -634,6 +660,39 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	}
 	decorateShare(&item, nodes)
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) revokeShare(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.store.RevokeShare(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "分享记录不存在")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	decorateShare(&item, nil)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteShare(r.Context(), id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "分享记录不存在")
+		return
+	} else if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
@@ -650,10 +709,41 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, "share URL expired")
 		return
 	}
-	message := shareMessage(kind, id, contentType, exp)
-	if !s.signer.Verify(message, query.Get("sig")) {
-		writeError(w, http.StatusForbidden, "invalid signature")
-		return
+	shareToken := query.Get("share")
+	if shareToken != "" {
+		message := managedShareMessage(shareToken, kind, id, contentType, exp)
+		if !s.signer.Verify(message, query.Get("sig")) {
+			writeError(w, http.StatusForbidden, "invalid signature")
+			return
+		}
+		item, err := s.store.ShareByTokenHash(r.Context(), auth.Digest(shareToken))
+		if errors.Is(err, sql.ErrNoRows) || item.Revoked || item.DeletedAt != nil {
+			writeError(w, http.StatusGone, "share URL revoked")
+			return
+		}
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if !shareURLMatches(item.URL, query) {
+			writeError(w, http.StatusForbidden, "invalid share record")
+			return
+		}
+	} else {
+		message := shareMessage(kind, id, contentType, exp)
+		if !s.signer.Verify(message, query.Get("sig")) {
+			writeError(w, http.StatusForbidden, "invalid signature")
+			return
+		}
+		blocked, err := s.legacyShareBlocked(r.Context(), kind, id, query)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if blocked {
+			writeError(w, http.StatusGone, "share URL revoked")
+			return
+		}
 	}
 	nodes, err := s.shareNodes(r.Context(), kind, id)
 	if err != nil || len(nodes) == 0 {
@@ -738,8 +828,77 @@ func (s *Server) signedURL(kind string, id int64, content string, exp int64) str
 	return strings.TrimRight(s.cfg.BaseURL, "/") + "/s?" + values.Encode()
 }
 
+func (s *Server) managedSignedURL(
+	shareToken string,
+	kind string,
+	id int64,
+	content string,
+	exp int64,
+) string {
+	message := managedShareMessage(shareToken, kind, id, content, exp)
+	values := url.Values{
+		"share":   []string{shareToken},
+		"kind":    []string{kind},
+		"id":      []string{strconv.FormatInt(id, 10)},
+		"content": []string{content},
+		"exp":     []string{strconv.FormatInt(exp, 10)},
+		"sig":     []string{s.signer.Sign(message)},
+	}
+	return strings.TrimRight(s.cfg.BaseURL, "/") + "/s?" + values.Encode()
+}
+
 func shareMessage(kind string, id int64, content string, exp int64) string {
 	return fmt.Sprintf("kind=%s&id=%d&content=%s&exp=%d", kind, id, content, exp)
+}
+
+func managedShareMessage(
+	shareToken string,
+	kind string,
+	id int64,
+	content string,
+	exp int64,
+) string {
+	return fmt.Sprintf(
+		"share=%s&kind=%s&id=%d&content=%s&exp=%d",
+		shareToken,
+		kind,
+		id,
+		content,
+		exp,
+	)
+}
+
+func (s *Server) legacyShareBlocked(
+	ctx context.Context,
+	kind string,
+	id int64,
+	query url.Values,
+) (bool, error) {
+	items, err := s.store.LegacySharesForTarget(ctx, kind, id)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		if shareURLMatches(item.URL, query) &&
+			(item.Revoked || item.DeletedAt != nil) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func shareURLMatches(rawURL string, query url.Values) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	stored := parsed.Query()
+	for _, key := range []string{"share", "kind", "id", "content", "exp", "sig"} {
+		if stored.Get(key) != query.Get(key) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) fetchSubscription(ctx context.Context, rawURL string) (string, error) {
