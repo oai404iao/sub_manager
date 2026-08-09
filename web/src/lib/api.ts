@@ -64,8 +64,6 @@ export type NodeExportResult = {
   count: number
 }
 
-export type NodeGroupUpdateMode = "add" | "remove" | "replace"
-
 export type NodeGroupUpdateResult = {
   updated: number
   subscriptions: number

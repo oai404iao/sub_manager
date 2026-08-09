@@ -395,7 +395,7 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 		map[string]any{
 			"ids":       nodeIDs,
 			"group_ids": []int64{secondGroup.ID},
-			"mode":      "add",
+			"mode":      "replace",
 		},
 		cookies[0],
 	)
@@ -407,10 +407,8 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(node.GroupIDs) != 2 ||
-			!containsInt64(node.GroupIDs, firstGroup.ID) ||
-			!containsInt64(node.GroupIDs, secondGroup.ID) {
-			t.Fatalf("node groups were not updated: %#v", node.GroupIDs)
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != secondGroup.ID {
+			t.Fatalf("node groups were not replaced: %#v", node.GroupIDs)
 		}
 	}
 
@@ -1003,15 +1001,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
-}
-
-func containsInt64(values []int64, target int64) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func performJSONRequest(

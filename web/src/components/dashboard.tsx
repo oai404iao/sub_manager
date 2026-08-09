@@ -95,7 +95,6 @@ import {
   type Node,
   type NodeExportFormat,
   type NodeExportResult,
-  type NodeGroupUpdateMode,
   type NodeGroupUpdateResult,
   type Share,
   type State,
@@ -144,12 +143,6 @@ const shareModeItems = [
   { label: "限时分享", value: "temporary" },
   { label: "永久分享", value: "permanent" },
 ]
-const nodeGroupModeItems = [
-  { label: "添加到分组", value: "add" },
-  { label: "从分组移出", value: "remove" },
-  { label: "替换全部分组", value: "replace" },
-]
-
 const blankNode: Node = {
   id: 0,
   name: "",
@@ -430,10 +423,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
     }
   }
 
-  async function updateSelectedNodeGroups(
-    mode: NodeGroupUpdateMode,
-    groupIDs: number[],
-  ) {
+  async function updateSelectedNodeGroups(groupIDs: number[]) {
     const ids = selectedNodes.map((node) => node.id)
     if (ids.length === 0) return false
     setBatchPending(true)
@@ -445,7 +435,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
         body: JSON.stringify({
           ids,
           group_ids: groupIDs,
-          mode,
+          mode: "replace",
         }),
       })
       await onReload()
@@ -1066,19 +1056,11 @@ function BatchGroupDialog({
   error: string
   pending: boolean
   onOpenChange: (open: boolean) => void
-  onApply: (mode: NodeGroupUpdateMode, groupIDs: number[]) => Promise<boolean>
+  onApply: (groupIDs: number[]) => Promise<boolean>
 }) {
   const managed = managedSubscriptionCount > 0
-  const [mode, setMode] = useState<NodeGroupUpdateMode>(
-    managed ? "replace" : "add",
-  )
   const [groupIDs, setGroupIDs] = useState<number[]>([])
   const [validationError, setValidationError] = useState("")
-  const modeDescription = {
-    add: "保留现有分组，并把所选节点加入勾选分组。",
-    remove: "仅从勾选分组移出，其他分组保持不变。",
-    replace: "将直接分组替换为勾选结果；不勾选会清空全部分组。",
-  }[mode]
   const targetGroupItems = [
     { label: "请选择目标分组", value: "0" },
     ...groups.map((group) => ({
@@ -1102,11 +1084,7 @@ function BatchGroupDialog({
       setValidationError("请选择一个订阅目标分组")
       return
     }
-    if (!managed && mode !== "replace" && groupIDs.length === 0) {
-      setValidationError("请至少选择一个分组")
-      return
-    }
-    if (await onApply(managed ? "replace" : mode, groupIDs)) {
+    if (await onApply(groupIDs)) {
       onOpenChange(false)
     }
   }
@@ -1122,12 +1100,12 @@ function BatchGroupDialog({
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>
-              {managed ? "迁移订阅与节点" : "批量修改分组"}
+              {managed ? "迁移订阅与节点" : "批量设置所属组"}
             </DialogTitle>
             <DialogDescription>
               {managed
                 ? `已选择 ${selectedCount} 个节点，涉及 ${managedSubscriptionCount} 条订阅。`
-                : `将对已选择的 ${selectedCount} 个节点修改直接所属分组。`}
+                : `将以勾选结果完整覆盖 ${selectedCount} 个节点的直接所属分组。`}
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -1168,72 +1146,41 @@ function BatchGroupDialog({
                 </Field>
               </>
             ) : (
-              <>
-                <Field>
-                  <FieldLabel>修改方式</FieldLabel>
-                  <Select
-                    items={nodeGroupModeItems}
-                    value={mode}
-                    disabled={pending}
-                    onValueChange={(value) => {
-                      if (
-                        value === "add" ||
-                        value === "remove" ||
-                        value === "replace"
-                      ) {
-                        setMode(value)
-                        setValidationError("")
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent alignItemWithTrigger={false}>
-                      <SelectGroup>
-                        {nodeGroupModeItems.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldDescription>{modeDescription}</FieldDescription>
-                </Field>
-                <FieldSet>
-                  <FieldLegend variant="label">选择分组</FieldLegend>
-                  {groups.length > 0 ? (
-                    <FieldGroup className="max-h-64 overflow-y-auto rounded-lg border p-3">
-                      {groups.map((group) => {
-                        const checkboxID = `batch-node-group-${group.id}`
-                        return (
-                          <Field key={group.id} orientation="horizontal">
-                            <Checkbox
-                              id={checkboxID}
-                              checked={groupIDs.includes(group.id)}
-                              disabled={pending}
-                              onCheckedChange={(checked) =>
-                                setGroup(group.id, checked)
-                              }
-                            />
-                            <FieldLabel
-                              htmlFor={checkboxID}
-                              className="font-normal"
-                            >
-                              {group.name}
-                            </FieldLabel>
-                          </Field>
-                        )
-                      })}
-                    </FieldGroup>
-                  ) : (
-                    <FieldDescription>
-                      暂无分组；使用“替换全部分组”可清空节点分组。
-                    </FieldDescription>
-                  )}
-                </FieldSet>
-              </>
+              <FieldSet>
+                <FieldLegend variant="label">所属组（可多选）</FieldLegend>
+                <FieldDescription>
+                  保存后会完整覆盖当前归属；不勾选任何分组将清空全部归属。
+                </FieldDescription>
+                {groups.length > 0 ? (
+                  <FieldGroup className="max-h-64 overflow-y-auto rounded-lg border p-3">
+                    {groups.map((group) => {
+                      const checkboxID = `batch-node-group-${group.id}`
+                      return (
+                        <Field key={group.id} orientation="horizontal">
+                          <Checkbox
+                            id={checkboxID}
+                            checked={groupIDs.includes(group.id)}
+                            disabled={pending}
+                            onCheckedChange={(checked) =>
+                              setGroup(group.id, checked)
+                            }
+                          />
+                          <FieldLabel
+                            htmlFor={checkboxID}
+                            className="font-normal"
+                          >
+                            {group.name}
+                          </FieldLabel>
+                        </Field>
+                      )
+                    })}
+                  </FieldGroup>
+                ) : (
+                  <FieldDescription>
+                    暂无分组；应用后会清空节点的全部分组归属。
+                  </FieldDescription>
+                )}
+              </FieldSet>
             )}
           </FieldGroup>
           {validationError || error ? (
@@ -2057,6 +2004,15 @@ function NodeDialog({
     setDraft((current) => ({ ...current, [key]: value }))
   }
 
+  function setNodeGroup(groupID: number, checked: boolean) {
+    setDraft((current) => ({
+      ...current,
+      group_ids: checked
+        ? [...new Set([...current.group_ids, groupID])]
+        : current.group_ids.filter((candidate) => candidate !== groupID),
+    }))
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError("")
@@ -2095,14 +2051,10 @@ function NodeDialog({
   }
 
   const managedNode = draft.subscription_id != null
-  const groupItems = [
-    ...(managedNode ? [] : [{ label: "不指定分组", value: "0" }]),
-    ...groups.map((group) => ({
-      label: group.name,
-      value: String(group.id),
-    })),
-  ]
-  const selectedGroup = draft.group_ids[0] ?? 0
+  const managedGroupItems = groups.map((group) => ({
+    label: group.name,
+    value: String(group.id),
+  }))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -2169,37 +2121,69 @@ function NodeDialog({
                   }
                 />
               </Field>
-              <Field>
-                <FieldLabel>分组</FieldLabel>
-                <Select
-                  items={groupItems}
-                  value={String(selectedGroup)}
-                  onValueChange={(value) =>
-                    update(
-                      "group_ids",
-                      Number(value) > 0 ? [Number(value)] : [],
-                    )
-                  }
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectGroup>
-                      {groupItems.map((item) => (
-                        <SelectItem key={item.value} value={item.value}>
-                          {item.label}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                {managedNode ? (
+              {managedNode ? (
+                <Field>
+                  <FieldLabel>目标分组</FieldLabel>
+                  <Select
+                    items={managedGroupItems}
+                    value={String(draft.group_ids[0] ?? 0)}
+                    onValueChange={(value) =>
+                      update("group_ids", [Number(value)])
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        {managedGroupItems.map((item) => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                   <FieldDescription>
                     修改后会同步更新订阅目标分组，并迁移该订阅的全部节点。
                   </FieldDescription>
-                ) : null}
-              </Field>
+                </Field>
+              ) : (
+                <FieldSet className="sm:col-span-2">
+                  <FieldLegend variant="label">所属组（可多选）</FieldLegend>
+                  <FieldDescription>
+                    保存后会以勾选结果完整覆盖节点当前的分组归属。
+                  </FieldDescription>
+                  {groups.length > 0 ? (
+                    <FieldGroup className="max-h-56 overflow-y-auto rounded-lg border p-3">
+                      {groups.map((group) => {
+                        const checkboxID = `node-group-${draft.id || "new"}-${group.id}`
+                        return (
+                          <Field key={group.id} orientation="horizontal">
+                            <Checkbox
+                              id={checkboxID}
+                              checked={draft.group_ids.includes(group.id)}
+                              onCheckedChange={(checked) =>
+                                setNodeGroup(group.id, checked)
+                              }
+                            />
+                            <FieldLabel
+                              htmlFor={checkboxID}
+                              className="font-normal"
+                            >
+                              {group.name}
+                            </FieldLabel>
+                          </Field>
+                        )
+                      })}
+                    </FieldGroup>
+                  ) : (
+                    <FieldDescription>
+                      暂无分组；保存后节点将不属于任何分组。
+                    </FieldDescription>
+                  )}
+                </FieldSet>
+              )}
             </FieldGroup>
 
             <Separator />

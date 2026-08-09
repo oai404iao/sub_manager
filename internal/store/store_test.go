@@ -42,6 +42,56 @@ func TestStateLoadsNodeGroups(t *testing.T) {
 	}
 }
 
+func TestSaveNodeReplacesMultipleGroups(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	firstGroup, err := database.CreateGroup(ctx, "first", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGroup, err := database.CreateGroup(ctx, "second", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdGroup, err := database.CreateGroup(ctx, "third", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.SaveNode(ctx, model.Node{
+		Name:     "multi-group",
+		Protocol: "socks5",
+		Server:   "example.com",
+		Port:     1080,
+		GroupIDs: []int64{firstGroup.ID, secondGroup.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(node.GroupIDs) != 2 ||
+		!containsID(node.GroupIDs, firstGroup.ID) ||
+		!containsID(node.GroupIDs, secondGroup.ID) {
+		t.Fatalf("initial groups = %#v", node.GroupIDs)
+	}
+
+	node.GroupIDs = []int64{secondGroup.ID, thirdGroup.ID}
+	node, err = database.SaveNode(ctx, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(node.GroupIDs) != 2 ||
+		!containsID(node.GroupIDs, secondGroup.ID) ||
+		!containsID(node.GroupIDs, thirdGroup.ID) ||
+		containsID(node.GroupIDs, firstGroup.ID) {
+		t.Fatalf("replaced groups = %#v", node.GroupIDs)
+	}
+}
+
 func TestNestedGroupsAggregateNodesAndRejectCycles(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
