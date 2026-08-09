@@ -57,7 +57,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/auth/me", s.me)
 	api.HandleFunc("POST /api/auth/logout", s.logout)
 	api.HandleFunc("GET /api/state", s.state)
-	api.HandleFunc("POST /api/groups", s.createGroup)
+	api.HandleFunc("POST /api/groups", s.saveGroup)
+	api.HandleFunc("PUT /api/groups/{id}", s.saveGroup)
 	api.HandleFunc("DELETE /api/groups/{id}", s.deleteGroup)
 	api.HandleFunc("POST /api/nodes", s.saveNode)
 	api.HandleFunc("PUT /api/nodes/{id}", s.saveNode)
@@ -172,20 +173,48 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
-func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
+func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name          string  `json:"name"`
+		Description   string  `json:"description"`
+		ChildGroupIDs []int64 `json:"child_group_ids"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	group, err := s.store.CreateGroup(r.Context(), request.Name, request.Description)
+	var group model.Group
+	var err error
+	status := http.StatusCreated
+	if r.Method == http.MethodPut {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		group, err = s.store.UpdateGroup(
+			r.Context(),
+			id,
+			request.Name,
+			request.Description,
+			request.ChildGroupIDs,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "分组不存在")
+			return
+		}
+		status = http.StatusOK
+	} else {
+		group, err = s.store.CreateGroup(
+			r.Context(),
+			request.Name,
+			request.Description,
+			request.ChildGroupIDs,
+		)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, friendlyDBError(err))
 		return
 	}
-	writeJSON(w, http.StatusCreated, group)
+	writeJSON(w, status, group)
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +364,12 @@ func (s *Server) saveSubscription(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	} else {
 		if request.GroupID == 0 {
-			group, groupErr := s.store.CreateGroup(r.Context(), request.Name, "由订阅自动创建")
+			group, groupErr := s.store.CreateGroup(
+				r.Context(),
+				request.Name,
+				"由订阅自动创建",
+				nil,
+			)
 			if groupErr != nil {
 				writeError(w, http.StatusBadRequest, friendlyDBError(groupErr))
 				return
@@ -709,7 +743,14 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 }
 
 func friendlyDBError(err error) string {
-	if strings.Contains(strings.ToLower(err.Error()), "unique") {
+	switch {
+	case errors.Is(err, store.ErrGroupNameRequired):
+		return "分组名称不能为空"
+	case errors.Is(err, store.ErrGroupChildNotFound):
+		return "下级分组不存在"
+	case errors.Is(err, store.ErrGroupCycle):
+		return "分组层级不能包含自身或形成循环"
+	case strings.Contains(strings.ToLower(err.Error()), "unique"):
 		return "名称已存在"
 	}
 	return err.Error()

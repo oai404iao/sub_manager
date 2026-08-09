@@ -7,6 +7,7 @@
 - [x] VLESS 与 SOCKS5 URI 解析/生成
 - [x] Base64 文本订阅和 Mihomo YAML 解析
 - [x] 节点、分组、订阅 API
+- [x] 无循环多层分组、递归筛选与聚合分享
 - [x] HMAC 参数签名单一分享 URL、限时/永久分享与历史记录
 - [x] 分组 URL 二维码、单节点 URL + URI 二维码
 - [x] 基础管理界面

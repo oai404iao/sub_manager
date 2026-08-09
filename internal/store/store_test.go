@@ -20,7 +20,7 @@ func TestStateLoadsNodeGroups(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	group, err := database.CreateGroup(ctx, "office", "")
+	group, err := database.CreateGroup(ctx, "office", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +42,209 @@ func TestStateLoadsNodeGroups(t *testing.T) {
 	}
 }
 
+func TestNestedGroupsAggregateNodesAndRejectCycles(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	leafOne, err := database.CreateGroup(ctx, "leaf one", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTwo, err := database.CreateGroup(ctx, "leaf two", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	middle, err := database.CreateGroup(ctx, "middle", "", []int64{leafOne.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := database.CreateGroup(
+		ctx,
+		"root",
+		"",
+		[]int64{middle.ID, leafTwo.ID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testNodes := []model.Node{
+		{Name: "leaf one", Protocol: "socks5", Server: "one.example.com", Port: 1080, GroupIDs: []int64{leafOne.ID}},
+		{Name: "middle", Protocol: "socks5", Server: "middle.example.com", Port: 1080, GroupIDs: []int64{middle.ID}},
+		{Name: "leaf two", Protocol: "socks5", Server: "two.example.com", Port: 1080, GroupIDs: []int64{leafTwo.ID}},
+		{Name: "root", Protocol: "socks5", Server: "root.example.com", Port: 1080, GroupIDs: []int64{root.ID}},
+		{
+			Name:     "shared",
+			Protocol: "socks5",
+			Server:   "shared.example.com",
+			Port:     1080,
+			GroupIDs: []int64{leafOne.ID, leafTwo.ID},
+		},
+	}
+	for _, node := range testNodes {
+		if _, err := database.SaveNode(ctx, node); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	root, err = database.Group(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.NodeCount != 5 {
+		t.Fatalf("root node count = %d, want 5", root.NodeCount)
+	}
+	if len(root.ChildGroupIDs) != 2 ||
+		!containsID(root.ChildGroupIDs, middle.ID) ||
+		!containsID(root.ChildGroupIDs, leafTwo.ID) {
+		t.Fatalf("unexpected root children: %#v", root.ChildGroupIDs)
+	}
+	nodes, err := database.Nodes(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 5 {
+		t.Fatalf("root nodes = %d, want 5: %#v", len(nodes), nodes)
+	}
+
+	groups, err := database.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listedRoot model.Group
+	for _, group := range groups {
+		if group.ID == root.ID {
+			listedRoot = group
+			break
+		}
+	}
+	if listedRoot.ID == 0 || listedRoot.NodeCount != 5 ||
+		len(listedRoot.ChildGroupIDs) != 2 {
+		t.Fatalf("unexpected listed root: %#v", listedRoot)
+	}
+
+	if _, err := database.UpdateGroup(
+		ctx,
+		leafOne.ID,
+		leafOne.Name,
+		leafOne.Description,
+		[]int64{root.ID},
+	); !errors.Is(err, ErrGroupCycle) {
+		t.Fatalf("cycle error = %v, want %v", err, ErrGroupCycle)
+	}
+	if _, err := database.UpdateGroup(
+		ctx,
+		root.ID,
+		root.Name,
+		root.Description,
+		[]int64{root.ID},
+	); !errors.Is(err, ErrGroupCycle) {
+		t.Fatalf("self cycle error = %v, want %v", err, ErrGroupCycle)
+	}
+	if _, err := database.UpdateGroup(
+		ctx,
+		root.ID,
+		root.Name,
+		root.Description,
+		[]int64{999999},
+	); !errors.Is(err, ErrGroupChildNotFound) {
+		t.Fatalf("missing child error = %v, want %v", err, ErrGroupChildNotFound)
+	}
+
+	root, err = database.UpdateGroup(
+		ctx,
+		root.ID,
+		"updated root",
+		"updated",
+		[]int64{leafTwo.ID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Name != "updated root" || root.NodeCount != 3 ||
+		len(root.ChildGroupIDs) != 1 || root.ChildGroupIDs[0] != leafTwo.ID {
+		t.Fatalf("unexpected updated root: %#v", root)
+	}
+	nodes, err = database.Nodes(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("updated root nodes = %d, want 3: %#v", len(nodes), nodes)
+	}
+}
+
+func TestOpenMigratesExistingDatabaseForGroupHierarchy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+CREATE TABLE groups (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE,
+	description TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO groups(name, description) VALUES ('legacy', 'existing database');
+`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(path, "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	child, err := database.CreateGroup(ctx, "child", "", nil)
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	parent, err := database.UpdateGroup(
+		ctx,
+		1,
+		"legacy",
+		"existing database",
+		[]int64{child.ID},
+	)
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if len(parent.ChildGroupIDs) != 1 || parent.ChildGroupIDs[0] != child.ID {
+		_ = database.Close()
+		t.Fatalf("unexpected migrated hierarchy: %#v", parent)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	parent, err = reopened.Group(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parent.ChildGroupIDs) != 1 || parent.ChildGroupIDs[0] != child.ID {
+		t.Fatalf("hierarchy did not survive reopen: %#v", parent)
+	}
+}
+
 func TestSubscriptionCRUDAndNodeReplacement(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
@@ -51,11 +254,11 @@ func TestSubscriptionCRUDAndNodeReplacement(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	firstGroup, err := database.CreateGroup(ctx, "first", "")
+	firstGroup, err := database.CreateGroup(ctx, "first", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondGroup, err := database.CreateGroup(ctx, "second", "")
+	secondGroup, err := database.CreateGroup(ctx, "second", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,4 +365,13 @@ func TestShareHistory(t *testing.T) {
 	if state.Shares[0].ID != permanent.ID || state.Shares[1].ID != temporary.ID {
 		t.Fatalf("shares are not newest first: %#v", state.Shares)
 	}
+}
+
+func containsID(ids []int64, target int64) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }

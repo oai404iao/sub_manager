@@ -8,11 +8,12 @@ type User struct {
 }
 
 type Group struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	NodeCount   int       `json:"node_count"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            int64     `json:"id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	ChildGroupIDs []int64   `json:"child_group_ids"`
+	NodeCount     int       `json:"node_count"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Node struct {

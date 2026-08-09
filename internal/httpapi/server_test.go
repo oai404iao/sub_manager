@@ -55,6 +55,121 @@ func TestPublicOperationalEndpoints(t *testing.T) {
 	})
 }
 
+func TestGroupHierarchyCRUDAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	handler := New(config.Config{SigningKey: "test-signing-key"}, database).Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not set a session cookie")
+	}
+
+	leafResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/groups",
+		map[string]any{"name": "leaf", "description": ""},
+		cookies[0],
+	)
+	if leafResponse.Code != http.StatusCreated {
+		t.Fatalf("leaf status = %d body=%s", leafResponse.Code, leafResponse.Body.String())
+	}
+	var leaf model.Group
+	if err := json.NewDecoder(leafResponse.Body).Decode(&leaf); err != nil {
+		t.Fatal(err)
+	}
+
+	parentResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/groups",
+		map[string]any{
+			"name":            "parent",
+			"description":     "nested",
+			"child_group_ids": []int64{leaf.ID},
+		},
+		cookies[0],
+	)
+	if parentResponse.Code != http.StatusCreated {
+		t.Fatalf("parent status = %d body=%s", parentResponse.Code, parentResponse.Body.String())
+	}
+	var parent model.Group
+	if err := json.NewDecoder(parentResponse.Body).Decode(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if len(parent.ChildGroupIDs) != 1 || parent.ChildGroupIDs[0] != leaf.ID {
+		t.Fatalf("unexpected parent: %#v", parent)
+	}
+
+	updatedResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPut,
+		"/api/groups/"+strconv.FormatInt(parent.ID, 10),
+		map[string]any{
+			"name":            "updated parent",
+			"description":     "updated",
+			"child_group_ids": []int64{leaf.ID},
+		},
+		cookies[0],
+	)
+	if updatedResponse.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", updatedResponse.Code, updatedResponse.Body.String())
+	}
+	if err := json.NewDecoder(updatedResponse.Body).Decode(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent.Name != "updated parent" || parent.Description != "updated" {
+		t.Fatalf("group was not updated: %#v", parent)
+	}
+
+	cycleResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPut,
+		"/api/groups/"+strconv.FormatInt(leaf.ID, 10),
+		map[string]any{
+			"name":            leaf.Name,
+			"description":     leaf.Description,
+			"child_group_ids": []int64{parent.ID},
+		},
+		cookies[0],
+	)
+	if cycleResponse.Code != http.StatusBadRequest ||
+		!strings.Contains(cycleResponse.Body.String(), "形成循环") {
+		t.Fatalf("cycle status = %d body=%s", cycleResponse.Code, cycleResponse.Body.String())
+	}
+
+	missingResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPut,
+		"/api/groups/999999",
+		map[string]any{
+			"name":            "missing",
+			"description":     "",
+			"child_group_ids": []int64{},
+		},
+		cookies[0],
+	)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d body=%s", missingResponse.Code, missingResponse.Body.String())
+	}
+}
+
 func TestSubscriptionCRUDAPI(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
@@ -85,7 +200,7 @@ func TestSubscriptionCRUDAPI(t *testing.T) {
 		t.Fatal("login did not set a session cookie")
 	}
 
-	group, err := database.CreateGroup(context.Background(), "subscriptions", "")
+	group, err := database.CreateGroup(context.Background(), "subscriptions", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +298,25 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 		t.Fatal("login did not set a session cookie")
 	}
 
-	group, err := database.CreateGroup(context.Background(), "shared group", "")
+	leafGroup, err := database.CreateGroup(context.Background(), "shared leaf", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childGroup, err := database.CreateGroup(
+		context.Background(),
+		"shared child",
+		"",
+		[]int64{leafGroup.ID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := database.CreateGroup(
+		context.Background(),
+		"shared group",
+		"",
+		[]int64{childGroup.ID},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,9 +327,18 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 		Port:     1080,
 		Username: "user",
 		Password: "password",
-		GroupIDs: []int64{group.ID},
+		GroupIDs: []int64{leafGroup.ID},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveNode(context.Background(), model.Node{
+		Name:     "parent node",
+		Protocol: "socks5",
+		Server:   "parent.example.com",
+		Port:     1080,
+		GroupIDs: []int64{group.ID},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,6 +430,9 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(decoded), "socks5://") {
 		t.Fatalf("decoded subscription = %q", decoded)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(decoded)), "\n"); len(lines) != 2 {
+		t.Fatalf("nested group share contains %d nodes, want 2: %q", len(lines), decoded)
 	}
 
 	legacyNodesURL := server.signedURL(

@@ -7,6 +7,7 @@ export type Group = {
   id: number
   name: string
   description: string
+  child_group_ids: number[]
   node_count: number
   created_at: string
 }

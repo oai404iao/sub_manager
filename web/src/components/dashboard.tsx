@@ -29,6 +29,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -54,9 +55,12 @@ import {
 } from "@/components/ui/empty"
 import {
   Field,
+  FieldContent,
   FieldDescription,
   FieldGroup,
   FieldLabel,
+  FieldLegend,
+  FieldSet,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
@@ -270,6 +274,20 @@ function setText(
   else delete target[key]
 }
 
+function nestedGroupIDs(groups: Group[], rootID: number) {
+  const groupsByID = new Map(groups.map((group) => [group.id, group]))
+  const result = new Set<number>()
+  const pending = [rootID]
+  while (pending.length > 0) {
+    const groupID = pending.pop()
+    if (!groupID || result.has(groupID)) continue
+    result.add(groupID)
+    const group = groupsByID.get(groupID)
+    if (group) pending.push(...group.child_group_ids)
+  }
+  return result
+}
+
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">(
     "nodes",
@@ -281,6 +299,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   const [nodeOpen, setNodeOpen] = useState(false)
   const [subscriptionOpen, setSubscriptionOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [editingGroup, setEditingGroup] = useState<Group | null>(null)
   const [editingNode, setEditingNode] = useState<Node>(blankNode)
   const [editingSubscription, setEditingSubscription] =
     useState<Subscription | null>(null)
@@ -290,13 +309,13 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
     name: string
   } | null>(null)
 
-  const visibleNodes = useMemo(
-    () =>
-      groupFilter === 0
-        ? state.nodes
-        : state.nodes.filter((node) => node.group_ids.includes(groupFilter)),
-    [groupFilter, state.nodes],
-  )
+  const visibleNodes = useMemo(() => {
+    if (groupFilter === 0) return state.nodes
+    const includedGroupIDs = nestedGroupIDs(state.groups, groupFilter)
+    return state.nodes.filter((node) =>
+      node.group_ids.some((groupID) => includedGroupIDs.has(groupID)),
+    )
+  }, [groupFilter, state.groups, state.nodes])
 
   async function run(action: () => Promise<unknown>) {
     setError("")
@@ -314,6 +333,16 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       group_ids: groupFilter ? [groupFilter] : [],
     })
     setNodeOpen(true)
+  }
+
+  function openNewGroup() {
+    setEditingGroup(null)
+    setGroupOpen(true)
+  }
+
+  function openEditGroup(group: Group) {
+    setEditingGroup(group)
+    setGroupOpen(true)
   }
 
   function openNewSubscription() {
@@ -359,13 +388,13 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  onClick={() => setGroupOpen(true)}
+                  onClick={openNewGroup}
                 >
                   <PlusIcon />
                   <span className="sr-only">新建分组</span>
                 </Button>
               </div>
-              <CardDescription>按用途组织和分享节点。</CardDescription>
+              <CardDescription>按层级组织、筛选和分享节点。</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-1">
               <Button
@@ -384,6 +413,11 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                   <Button
                     variant={groupFilter === group.id ? "secondary" : "ghost"}
                     className="min-w-0 flex-1 justify-between"
+                    title={
+                      group.child_group_ids.length > 0
+                        ? `包含 ${group.child_group_ids.length} 个下级分组`
+                        : undefined
+                    }
                     onClick={() => setGroupFilter(group.id)}
                   >
                     <span className="truncate">{group.name}</span>
@@ -398,6 +432,12 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
                       <DropdownMenuGroup>
+                        <DropdownMenuItem
+                          onClick={() => openEditGroup(group)}
+                        >
+                          <PencilIcon />
+                          编辑分组
+                        </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={() =>
                             openShare("group", group.id, group.name)
@@ -533,9 +573,12 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       </main>
 
       <GroupDialog
+        key={`${editingGroup?.id ?? 0}-${groupOpen}`}
         open={groupOpen}
+        group={editingGroup}
+        groups={state.groups}
         onOpenChange={setGroupOpen}
-        onCreated={() => onReload()}
+        onSaved={() => onReload()}
       />
       <ImportDialog
         open={importOpen}
@@ -914,41 +957,73 @@ function formatShareTime(value: string) {
 
 function GroupDialog({
   open,
+  group,
+  groups,
   onOpenChange,
-  onCreated,
+  onSaved,
 }: {
   open: boolean
+  group: Group | null
+  groups: Group[]
   onOpenChange: (open: boolean) => void
-  onCreated: () => Promise<void>
+  onSaved: () => Promise<void>
 }) {
-  const [name, setName] = useState("")
-  const [description, setDescription] = useState("")
+  const [name, setName] = useState(group?.name ?? "")
+  const [description, setDescription] = useState(group?.description ?? "")
+  const [childGroupIDs, setChildGroupIDs] = useState(
+    group?.child_group_ids ?? [],
+  )
   const [error, setError] = useState("")
+  const unavailableGroupIDs = useMemo(() => {
+    if (!group) return new Set<number>()
+    return new Set(
+      groups
+        .filter((candidate) =>
+          nestedGroupIDs(groups, candidate.id).has(group.id),
+        )
+        .map((candidate) => candidate.id),
+    )
+  }, [group, groups])
+  const selectableGroups = groups.filter(
+    (candidate) => candidate.id !== group?.id,
+  )
+
+  function setChildGroup(groupID: number, checked: boolean) {
+    setChildGroupIDs((current) =>
+      checked
+        ? [...new Set([...current, groupID])]
+        : current.filter((candidate) => candidate !== groupID),
+    )
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError("")
     try {
-      await api("/api/groups", {
-        method: "POST",
-        body: JSON.stringify({ name, description }),
+      await api(group ? `/api/groups/${group.id}` : "/api/groups", {
+        method: group ? "PUT" : "POST",
+        body: JSON.stringify({
+          name,
+          description,
+          child_group_ids: childGroupIDs,
+        }),
       })
-      setName("")
-      setDescription("")
       onOpenChange(false)
-      await onCreated()
+      await onSaved()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "创建失败")
+      setError(caught instanceof Error ? caught.message : "保存分组失败")
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-xl">
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>新建分组</DialogTitle>
-            <DialogDescription>节点可以同时属于多个分组。</DialogDescription>
+            <DialogTitle>{group ? "编辑分组" : "新建分组"}</DialogTitle>
+            <DialogDescription>
+              节点可以属于多个分组，分组也可以递归包含下级分组。
+            </DialogDescription>
           </DialogHeader>
           {error ? (
             <Alert variant="destructive">
@@ -960,6 +1035,7 @@ function GroupDialog({
               <FieldLabel htmlFor="group-name">名称</FieldLabel>
               <Input
                 id="group-name"
+                required
                 value={name}
                 onChange={(event) => setName(event.target.value)}
               />
@@ -972,9 +1048,59 @@ function GroupDialog({
                 onChange={(event) => setDescription(event.target.value)}
               />
             </Field>
+            <FieldSet>
+              <FieldLegend variant="label">下级分组</FieldLegend>
+              <FieldDescription>
+                筛选或分享当前分组时，会递归聚合所有下级分组的节点。
+              </FieldDescription>
+              {selectableGroups.length > 0 ? (
+                <FieldGroup className="max-h-56 overflow-y-auto rounded-lg border p-3">
+                  {selectableGroups.map((candidate) => {
+                    const disabled = unavailableGroupIDs.has(candidate.id)
+                    const checkboxID = `group-child-${candidate.id}`
+                    return (
+                      <Field
+                        key={candidate.id}
+                        orientation="horizontal"
+                        data-disabled={disabled || undefined}
+                      >
+                        <Checkbox
+                          id={checkboxID}
+                          checked={childGroupIDs.includes(candidate.id)}
+                          disabled={disabled}
+                          onCheckedChange={(checked) =>
+                            setChildGroup(candidate.id, checked)
+                          }
+                        />
+                        <FieldContent>
+                          <FieldLabel
+                            htmlFor={checkboxID}
+                            className="font-normal"
+                          >
+                            {candidate.name}
+                          </FieldLabel>
+                          {disabled ? (
+                            <FieldDescription>
+                              选择后会形成循环层级。
+                            </FieldDescription>
+                          ) : candidate.child_group_ids.length > 0 ? (
+                            <FieldDescription>
+                              已包含 {candidate.child_group_ids.length}{" "}
+                              个直接下级分组。
+                            </FieldDescription>
+                          ) : null}
+                        </FieldContent>
+                      </Field>
+                    )
+                  })}
+                </FieldGroup>
+              ) : (
+                <FieldDescription>暂无其他分组可选。</FieldDescription>
+              )}
+            </FieldSet>
           </FieldGroup>
           <DialogFooter>
-            <Button type="submit">创建</Button>
+            <Button type="submit">{group ? "保存" : "创建"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

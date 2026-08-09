@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,12 @@ import (
 type Store struct {
 	db *sql.DB
 }
+
+var (
+	ErrGroupNameRequired  = errors.New("group name is required")
+	ErrGroupChildNotFound = errors.New("child group not found")
+	ErrGroupCycle         = errors.New("group hierarchy cycle")
+)
 
 func Open(path, adminUser, adminPassword string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && filepath.Dir(path) != "." {
@@ -67,6 +74,13 @@ CREATE TABLE IF NOT EXISTS groups (
 	description TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS group_children (
+	parent_group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+	child_group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+	PRIMARY KEY(parent_group_id, child_group_id),
+	CHECK(parent_group_id <> child_group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_group_children_child ON group_children(child_group_id);
 CREATE TABLE IF NOT EXISTS subscriptions (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	name TEXT NOT NULL,
@@ -93,6 +107,7 @@ CREATE TABLE IF NOT EXISTS node_groups (
 	group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
 	PRIMARY KEY(node_id, group_id)
 );
+CREATE INDEX IF NOT EXISTS idx_node_groups_group ON node_groups(group_id, node_id);
 CREATE TABLE IF NOT EXISTS shares (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	kind TEXT NOT NULL CHECK(kind IN ('node', 'group')),
@@ -189,44 +204,155 @@ func (s *Store) State(ctx context.Context, user model.User) (model.State, error)
 
 func (s *Store) Groups(ctx context.Context) ([]model.Group, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT g.id, g.name, g.description, g.created_at, COUNT(ng.node_id)
-FROM groups g LEFT JOIN node_groups ng ON ng.group_id = g.id
-GROUP BY g.id ORDER BY g.name`)
+WITH RECURSIVE group_tree(root_id, group_id) AS (
+	SELECT id, id FROM groups
+	UNION
+	SELECT tree.root_id, children.child_group_id
+	FROM group_tree tree
+	JOIN group_children children ON children.parent_group_id = tree.group_id
+)
+SELECT g.id, g.name, g.description, g.created_at, COUNT(DISTINCT ng.node_id)
+FROM groups g
+LEFT JOIN group_tree tree ON tree.root_id = g.id
+LEFT JOIN node_groups ng ON ng.group_id = tree.group_id
+GROUP BY g.id
+ORDER BY g.name COLLATE NOCASE, g.id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	result := []model.Group{}
 	for rows.Next() {
 		var group model.Group
-		if err := rows.Scan(&group.ID, &group.Name, &group.Description, &group.CreatedAt, &group.NodeCount); err != nil {
+		if err := rows.Scan(
+			&group.ID,
+			&group.Name,
+			&group.Description,
+			&group.CreatedAt,
+			&group.NodeCount,
+		); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		result = append(result, group)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	children, err := s.groupChildrenByParent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range result {
+		result[index].ChildGroupIDs = append([]int64{}, children[result[index].ID]...)
+	}
+	return result, nil
 }
 
-func (s *Store) CreateGroup(ctx context.Context, name, description string) (model.Group, error) {
+func (s *Store) CreateGroup(
+	ctx context.Context,
+	name string,
+	description string,
+	childGroupIDs []int64,
+) (model.Group, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return model.Group{}, errors.New("group name is required")
+		return model.Group{}, ErrGroupNameRequired
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO groups(name, description) VALUES (?, ?)`, name, description)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.Group{}, err
 	}
-	id, _ := result.LastInsertId()
+	defer tx.Rollback()
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO groups(name, description) VALUES (?, ?)`,
+		name,
+		description,
+	)
+	if err != nil {
+		return model.Group{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.Group{}, err
+	}
+	if err := setGroupChildren(ctx, tx, id, childGroupIDs); err != nil {
+		return model.Group{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Group{}, err
+	}
+	return s.Group(ctx, id)
+}
+
+func (s *Store) UpdateGroup(
+	ctx context.Context,
+	id int64,
+	name string,
+	description string,
+	childGroupIDs []int64,
+) (model.Group, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return model.Group{}, ErrGroupNameRequired
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Group{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE groups SET name = ?, description = ? WHERE id = ?`,
+		name,
+		description,
+		id,
+	)
+	if err != nil {
+		return model.Group{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.Group{}, err
+	}
+	if affected == 0 {
+		return model.Group{}, sql.ErrNoRows
+	}
+	if err := setGroupChildren(ctx, tx, id, childGroupIDs); err != nil {
+		return model.Group{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Group{}, err
+	}
 	return s.Group(ctx, id)
 }
 
 func (s *Store) Group(ctx context.Context, id int64) (model.Group, error) {
 	var group model.Group
 	err := s.db.QueryRowContext(ctx, `
-SELECT g.id, g.name, g.description, g.created_at, COUNT(ng.node_id)
-FROM groups g LEFT JOIN node_groups ng ON ng.group_id = g.id
-WHERE g.id = ? GROUP BY g.id`, id).
+WITH RECURSIVE selected_groups(id) AS (
+	SELECT ?
+	UNION
+	SELECT children.child_group_id
+	FROM group_children children
+	JOIN selected_groups selected ON selected.id = children.parent_group_id
+)
+SELECT g.id, g.name, g.description, g.created_at, (
+	SELECT COUNT(DISTINCT ng.node_id)
+	FROM node_groups ng
+	JOIN selected_groups selected ON selected.id = ng.group_id
+)
+FROM groups g
+WHERE g.id = ?`, id, id).
 		Scan(&group.ID, &group.Name, &group.Description, &group.CreatedAt, &group.NodeCount)
+	if err != nil {
+		return model.Group{}, err
+	}
+	group.ChildGroupIDs, err = s.groupChildren(ctx, id)
 	return group, err
 }
 
@@ -236,14 +362,28 @@ func (s *Store) DeleteGroup(ctx context.Context, id int64) error {
 }
 
 func (s *Store) Nodes(ctx context.Context, groupID int64) ([]model.Node, error) {
-	query := `
+	var query string
+	args := []any{}
+	if groupID > 0 {
+		query = `
+WITH RECURSIVE selected_groups(id) AS (
+	SELECT ?
+	UNION
+	SELECT children.child_group_id
+	FROM group_children children
+	JOIN selected_groups selected ON selected.id = children.parent_group_id
+)
+SELECT DISTINCT n.id, n.name, n.protocol, n.server, n.port, n.config_json,
+	n.subscription_id, n.created_at, n.updated_at
+FROM nodes n
+JOIN node_groups filter_ng ON filter_ng.node_id = n.id
+JOIN selected_groups selected ON selected.id = filter_ng.group_id`
+		args = append(args, groupID)
+	} else {
+		query = `
 SELECT DISTINCT n.id, n.name, n.protocol, n.server, n.port, n.config_json,
 	n.subscription_id, n.created_at, n.updated_at
 FROM nodes n`
-	args := []any{}
-	if groupID > 0 {
-		query += ` JOIN node_groups filter_ng ON filter_ng.node_id = n.id WHERE filter_ng.group_id = ?`
-		args = append(args, groupID)
 	}
 	query += ` ORDER BY n.updated_at DESC, n.id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -364,6 +504,124 @@ func (s *Store) nodeGroups(ctx context.Context, id int64) ([]int64, error) {
 		result = append(result, groupID)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) groupChildren(ctx context.Context, id int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT child_group_id
+FROM group_children
+WHERE parent_group_id = ?
+ORDER BY child_group_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []int64{}
+	for rows.Next() {
+		var childGroupID int64
+		if err := rows.Scan(&childGroupID); err != nil {
+			return nil, err
+		}
+		result = append(result, childGroupID)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) groupChildrenByParent(ctx context.Context) (map[int64][]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT parent_group_id, child_group_id
+FROM group_children
+ORDER BY parent_group_id, child_group_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[int64][]int64{}
+	for rows.Next() {
+		var parentGroupID, childGroupID int64
+		if err := rows.Scan(&parentGroupID, &childGroupID); err != nil {
+			return nil, err
+		}
+		result[parentGroupID] = append(result[parentGroupID], childGroupID)
+	}
+	return result, rows.Err()
+}
+
+func setGroupChildren(
+	ctx context.Context,
+	tx *sql.Tx,
+	parentGroupID int64,
+	childGroupIDs []int64,
+) error {
+	unique := make(map[int64]struct{}, len(childGroupIDs))
+	normalized := make([]int64, 0, len(childGroupIDs))
+	for _, childGroupID := range childGroupIDs {
+		if _, ok := unique[childGroupID]; ok {
+			continue
+		}
+		unique[childGroupID] = struct{}{}
+		normalized = append(normalized, childGroupID)
+	}
+	sort.Slice(normalized, func(left, right int) bool {
+		return normalized[left] < normalized[right]
+	})
+
+	for _, childGroupID := range normalized {
+		if childGroupID < 1 {
+			return ErrGroupChildNotFound
+		}
+		if childGroupID == parentGroupID {
+			return ErrGroupCycle
+		}
+		var exists int
+		err := tx.QueryRowContext(
+			ctx,
+			`SELECT 1 FROM groups WHERE id = ?`,
+			childGroupID,
+		).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupChildNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		var createsCycle bool
+		err = tx.QueryRowContext(ctx, `
+WITH RECURSIVE descendants(id) AS (
+	SELECT ?
+	UNION
+	SELECT children.child_group_id
+	FROM group_children children
+	JOIN descendants descendant ON descendant.id = children.parent_group_id
+)
+SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?)`,
+			childGroupID,
+			parentGroupID,
+		).Scan(&createsCycle)
+		if err != nil {
+			return err
+		}
+		if createsCycle {
+			return ErrGroupCycle
+		}
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM group_children WHERE parent_group_id = ?`,
+		parentGroupID,
+	); err != nil {
+		return err
+	}
+	for _, childGroupID := range normalized {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO group_children(parent_group_id, child_group_id)
+VALUES (?, ?)`, parentGroupID, childGroupID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Subscriptions(ctx context.Context) ([]model.Subscription, error) {
