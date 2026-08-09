@@ -316,6 +316,174 @@ func TestSubscriptionCRUDAndNodeReplacement(t *testing.T) {
 	}
 }
 
+func TestBatchNodeOperations(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	firstGroup, err := database.CreateGroup(ctx, "batch first", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGroup, err := database.CreateGroup(ctx, "batch second", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNode, err := database.SaveNode(ctx, model.Node{
+		Name:     "batch first",
+		Protocol: "socks5",
+		Server:   "first.example.com",
+		Port:     1080,
+		GroupIDs: []int64{firstGroup.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondNode, err := database.SaveNode(ctx, model.Node{
+		Name:     "batch second",
+		Protocol: "socks5",
+		Server:   "second.example.com",
+		Port:     1080,
+		GroupIDs: []int64{firstGroup.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ordered, err := database.NodesByIDs(ctx, []int64{secondNode.ID, firstNode.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != 2 || ordered[0].ID != secondNode.ID || ordered[1].ID != firstNode.ID {
+		t.Fatalf("nodes were not returned in request order: %#v", ordered)
+	}
+
+	nodeIDs := []int64{firstNode.ID, secondNode.ID}
+	if updated, err := database.UpdateNodeGroups(
+		ctx,
+		nodeIDs,
+		[]int64{secondGroup.ID},
+		NodeGroupModeAdd,
+	); err != nil || updated != 2 {
+		t.Fatalf("add groups updated=%d err=%v", updated, err)
+	}
+	for _, nodeID := range nodeIDs {
+		node, err := database.Node(ctx, nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 2 ||
+			!containsID(node.GroupIDs, firstGroup.ID) ||
+			!containsID(node.GroupIDs, secondGroup.ID) {
+			t.Fatalf("groups were not added: %#v", node.GroupIDs)
+		}
+	}
+
+	if updated, err := database.UpdateNodeGroups(
+		ctx,
+		nodeIDs,
+		[]int64{firstGroup.ID},
+		NodeGroupModeRemove,
+	); err != nil || updated != 2 {
+		t.Fatalf("remove groups updated=%d err=%v", updated, err)
+	}
+	for _, nodeID := range nodeIDs {
+		node, err := database.Node(ctx, nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 1 || node.GroupIDs[0] != secondGroup.ID {
+			t.Fatalf("groups were not removed: %#v", node.GroupIDs)
+		}
+	}
+
+	if updated, err := database.UpdateNodeGroups(
+		ctx,
+		nodeIDs,
+		nil,
+		NodeGroupModeReplace,
+	); err != nil || updated != 2 {
+		t.Fatalf("replace groups updated=%d err=%v", updated, err)
+	}
+	for _, nodeID := range nodeIDs {
+		node, err := database.Node(ctx, nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 0 {
+			t.Fatalf("groups were not cleared: %#v", node.GroupIDs)
+		}
+	}
+
+	subscription, err := database.CreateSubscription(
+		ctx,
+		"batch managed",
+		"https://example.com/subscription",
+		firstGroup.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReplaceSubscriptionNodes(
+		ctx,
+		subscription.ID,
+		firstGroup.ID,
+		[]model.Node{{
+			Name:     "managed",
+			Protocol: "socks5",
+			Server:   "managed.example.com",
+			Port:     1080,
+		}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := database.Nodes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var managedNode model.Node
+	for _, node := range nodes {
+		if node.SubscriptionID != nil {
+			managedNode = node
+			break
+		}
+	}
+	if managedNode.ID == 0 {
+		t.Fatal("managed node was not created")
+	}
+	if _, err := database.UpdateNodeGroups(
+		ctx,
+		[]int64{managedNode.ID},
+		[]int64{secondGroup.ID},
+		NodeGroupModeAdd,
+	); !errors.Is(err, ErrManagedNodeGroups) {
+		t.Fatalf("managed node group error = %v, want %v", err, ErrManagedNodeGroups)
+	}
+
+	if _, err := database.DeleteNodes(
+		ctx,
+		[]int64{firstNode.ID, 999999},
+	); !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("missing node delete error = %v, want %v", err, ErrNodeNotFound)
+	}
+	if _, err := database.Node(ctx, firstNode.ID); err != nil {
+		t.Fatalf("batch delete was not atomic: %v", err)
+	}
+	if deleted, err := database.DeleteNodes(ctx, nodeIDs); err != nil || deleted != 2 {
+		t.Fatalf("delete nodes deleted=%d err=%v", deleted, err)
+	}
+	if _, err := database.Node(ctx, firstNode.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("first node still exists: %v", err)
+	}
+	if _, err := database.Node(ctx, secondNode.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second node still exists: %v", err)
+	}
+}
+
 func TestShareHistory(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {

@@ -60,6 +60,10 @@
 - `/api/state`：管理页一次性加载节点、分组、订阅、分享历史与统计。
 - `/api/nodes`、`/api/subscriptions`：节点与订阅 CRUD；订阅刷新时原子替换其托管节点。
 - `/api/groups`：分组创建、编辑、删除与下级分组组织。
+- `DELETE /api/nodes`：在事务中批量删除所选节点。
+- `PATCH /api/nodes/groups`：批量添加、移出或替换手工节点的直接分组；订阅托管节点
+  的分组仍由订阅目标分组控制。
+- `POST /api/nodes/export`：按请求顺序导出多行 URI 或标准 Base64 订阅内容。
 - `/api/nodes/import`：解析 Xray/Mihomo YAML、JSON、URI 和 Base64 内容。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
 - `/api/shares`：生成并记录单一签名订阅 URL；支持限时与永久分享。分组仅返回

@@ -28,7 +28,12 @@ import (
 	"github.com/oai404iao/sub_manager/internal/webassets"
 )
 
-const sessionCookie = "subman_session"
+const (
+	sessionCookie              = "subman_session"
+	maxBatchNodes              = 500
+	maxBatchGroups             = 100
+	maxBatchGroupRelationships = 10000
+)
 
 type Server struct {
 	cfg    config.Config
@@ -62,6 +67,9 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/groups/{id}", s.deleteGroup)
 	api.HandleFunc("POST /api/nodes", s.saveNode)
 	api.HandleFunc("PUT /api/nodes/{id}", s.saveNode)
+	api.HandleFunc("POST /api/nodes/export", s.exportNodes)
+	api.HandleFunc("PATCH /api/nodes/groups", s.updateNodeGroups)
+	api.HandleFunc("DELETE /api/nodes", s.deleteNodes)
 	api.HandleFunc("GET /api/nodes/{id}/xray", s.exportXrayNode)
 	api.HandleFunc("DELETE /api/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/nodes/import", s.importNodes)
@@ -296,6 +304,131 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		IDs    []int64 `json:"ids"`
+		Format string  `json:"format"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	ids, err := normalizeBatchIDs(request.IDs, maxBatchNodes, "节点", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(request.Format))
+	if format != "uri" && format != "base64" {
+		writeError(w, http.StatusBadRequest, "format 必须为 uri 或 base64")
+		return
+	}
+	nodes, err := s.store.NodesByIDs(r.Context(), ids)
+	if errors.Is(err, store.ErrNodeNotFound) {
+		writeError(w, http.StatusNotFound, "部分节点不存在，请刷新后重试")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	for index := range nodes {
+		if protocol.EnsureXrayOutbound(&nodes[index]) == nil {
+			_ = protocol.ApplyXrayOutbound(&nodes[index])
+		}
+	}
+	var content string
+	if format == "uri" {
+		content, err = protocol.FullContent(nodes)
+	} else {
+		content, err = protocol.Subscription(nodes)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "导出节点失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"content": content,
+		"count":   len(nodes),
+	})
+}
+
+func (s *Server) updateNodeGroups(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		IDs      []int64 `json:"ids"`
+		GroupIDs []int64 `json:"group_ids"`
+		Mode     string  `json:"mode"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	nodeIDs, err := normalizeBatchIDs(request.IDs, maxBatchNodes, "节点", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(request.Mode))
+	switch mode {
+	case store.NodeGroupModeAdd, store.NodeGroupModeRemove, store.NodeGroupModeReplace:
+	default:
+		writeError(w, http.StatusBadRequest, "mode 必须为 add、remove 或 replace")
+		return
+	}
+	groupIDs, err := normalizeBatchIDs(
+		request.GroupIDs,
+		maxBatchGroups,
+		"分组",
+		mode == store.NodeGroupModeReplace,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(nodeIDs)*len(groupIDs) > maxBatchGroupRelationships {
+		writeError(w, http.StatusBadRequest, "单次分组关系修改过多")
+		return
+	}
+	updated, err := s.store.UpdateNodeGroups(r.Context(), nodeIDs, groupIDs, mode)
+	switch {
+	case errors.Is(err, store.ErrNodeNotFound):
+		writeError(w, http.StatusNotFound, "部分节点不存在，请刷新后重试")
+		return
+	case errors.Is(err, store.ErrGroupNotFound):
+		writeError(w, http.StatusNotFound, "部分分组不存在，请刷新后重试")
+		return
+	case errors.Is(err, store.ErrManagedNodeGroups):
+		writeError(w, http.StatusBadRequest, "订阅托管节点的分组由订阅决定，请修改订阅目标分组")
+		return
+	case err != nil:
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"updated": updated})
+}
+
+func (s *Server) deleteNodes(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	ids, err := normalizeBatchIDs(request.IDs, maxBatchNodes, "节点", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	deleted, err := s.store.DeleteNodes(r.Context(), ids)
+	if errors.Is(err, store.ErrNodeNotFound) {
+		writeError(w, http.StatusNotFound, "部分节点不存在，请刷新后重试")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 }
 
 func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) {
@@ -740,6 +873,33 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func normalizeBatchIDs(
+	ids []int64,
+	maximum int,
+	label string,
+	allowEmpty bool,
+) ([]int64, error) {
+	seen := make(map[int64]struct{}, len(ids))
+	result := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id < 1 {
+			return nil, fmt.Errorf("%s ID 必须为正整数", label)
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+		if len(result) > maximum {
+			return nil, fmt.Errorf("单次最多选择 %d 个%s", maximum, label)
+		}
+	}
+	if len(result) == 0 && !allowEmpty {
+		return nil, fmt.Errorf("至少选择一个%s", label)
+	}
+	return result, nil
 }
 
 func friendlyDBError(err error) string {

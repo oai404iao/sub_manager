@@ -57,6 +57,15 @@ export type Node = {
   updated_at: string
 }
 
+export type NodeExportFormat = "uri" | "base64"
+
+export type NodeExportResult = {
+  content: string
+  count: number
+}
+
+export type NodeGroupUpdateMode = "add" | "remove" | "replace"
+
 export type Subscription = {
   id: number
   name: string

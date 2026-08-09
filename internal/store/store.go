@@ -23,9 +23,19 @@ type Store struct {
 }
 
 var (
-	ErrGroupNameRequired  = errors.New("group name is required")
-	ErrGroupChildNotFound = errors.New("child group not found")
-	ErrGroupCycle         = errors.New("group hierarchy cycle")
+	ErrGroupNameRequired    = errors.New("group name is required")
+	ErrGroupChildNotFound   = errors.New("child group not found")
+	ErrGroupCycle           = errors.New("group hierarchy cycle")
+	ErrGroupNotFound        = errors.New("group not found")
+	ErrNodeNotFound         = errors.New("node not found")
+	ErrManagedNodeGroups    = errors.New("subscription-managed node groups cannot be changed")
+	ErrInvalidNodeGroupMode = errors.New("invalid node group update mode")
+)
+
+const (
+	NodeGroupModeAdd     = "add"
+	NodeGroupModeRemove  = "remove"
+	NodeGroupModeReplace = "replace"
 )
 
 func Open(path, adminUser, adminPassword string) (*Store, error) {
@@ -427,6 +437,52 @@ FROM nodes WHERE id = ?`, id)
 	return node, err
 }
 
+func (s *Store) NodesByIDs(ctx context.Context, ids []int64) ([]model.Node, error) {
+	if len(ids) == 0 {
+		return []model.Node{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+SELECT id, name, protocol, server, port, config_json, subscription_id, created_at, updated_at
+FROM nodes
+WHERE id IN (%s)`, placeholders(len(ids))), int64Args(ids)...)
+	if err != nil {
+		return nil, err
+	}
+	loaded := make([]model.Node, 0, len(ids))
+	for rows.Next() {
+		node, err := scanNode(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		loaded = append(loaded, node)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	nodesByID := make(map[int64]model.Node, len(loaded))
+	for index := range loaded {
+		loaded[index].GroupIDs, err = s.nodeGroups(ctx, loaded[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		nodesByID[loaded[index].ID] = loaded[index]
+	}
+	result := make([]model.Node, 0, len(ids))
+	for _, id := range ids {
+		node, ok := nodesByID[id]
+		if !ok {
+			return nil, ErrNodeNotFound
+		}
+		result = append(result, node)
+	}
+	return result, nil
+}
+
 func (s *Store) SaveNode(ctx context.Context, node model.Node) (model.Node, error) {
 	data, err := json.Marshal(node)
 	if err != nil {
@@ -487,6 +543,157 @@ func (s *Store) SaveNodes(ctx context.Context, nodes []model.Node) (int, error) 
 func (s *Store) DeleteNode(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
 	return err
+}
+
+func (s *Store) DeleteNodes(ctx context.Context, ids []int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM nodes WHERE id IN (%s)`, placeholders(len(ids)))
+	var count int
+	if err := tx.QueryRowContext(ctx, query, int64Args(ids)...).Scan(&count); err != nil {
+		return 0, err
+	}
+	if count != len(ids) {
+		return 0, ErrNodeNotFound
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`DELETE FROM nodes WHERE id IN (%s)`, placeholders(len(ids))),
+		int64Args(ids)...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+func (s *Store) UpdateNodeGroups(
+	ctx context.Context,
+	nodeIDs []int64,
+	groupIDs []int64,
+	mode string,
+) (int, error) {
+	switch mode {
+	case NodeGroupModeAdd, NodeGroupModeRemove, NodeGroupModeReplace:
+	default:
+		return 0, ErrInvalidNodeGroupMode
+	}
+	if len(nodeIDs) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var nodeCount, managedCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`
+SELECT COUNT(*),
+	COALESCE(SUM(CASE WHEN subscription_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+FROM nodes
+WHERE id IN (%s)`, placeholders(len(nodeIDs))),
+		int64Args(nodeIDs)...,
+	).Scan(&nodeCount, &managedCount); err != nil {
+		return 0, err
+	}
+	if nodeCount != len(nodeIDs) {
+		return 0, ErrNodeNotFound
+	}
+	if managedCount > 0 {
+		return 0, ErrManagedNodeGroups
+	}
+	if len(groupIDs) > 0 {
+		var groupCount int
+		if err := tx.QueryRowContext(
+			ctx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM groups WHERE id IN (%s)`, placeholders(len(groupIDs))),
+			int64Args(groupIDs)...,
+		).Scan(&groupCount); err != nil {
+			return 0, err
+		}
+		if groupCount != len(groupIDs) {
+			return 0, ErrGroupNotFound
+		}
+	}
+
+	switch mode {
+	case NodeGroupModeAdd:
+		for _, nodeID := range nodeIDs {
+			for _, groupID := range groupIDs {
+				if _, err := tx.ExecContext(
+					ctx,
+					`INSERT OR IGNORE INTO node_groups(node_id, group_id) VALUES (?, ?)`,
+					nodeID,
+					groupID,
+				); err != nil {
+					return 0, err
+				}
+			}
+		}
+	case NodeGroupModeRemove:
+		if len(groupIDs) > 0 {
+			args := append(int64Args(nodeIDs), int64Args(groupIDs)...)
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf(`
+DELETE FROM node_groups
+WHERE node_id IN (%s) AND group_id IN (%s)`,
+					placeholders(len(nodeIDs)),
+					placeholders(len(groupIDs)),
+				),
+				args...,
+			); err != nil {
+				return 0, err
+			}
+		}
+	case NodeGroupModeReplace:
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf(`DELETE FROM node_groups WHERE node_id IN (%s)`, placeholders(len(nodeIDs))),
+			int64Args(nodeIDs)...,
+		); err != nil {
+			return 0, err
+		}
+		for _, nodeID := range nodeIDs {
+			for _, groupID := range groupIDs {
+				if _, err := tx.ExecContext(
+					ctx,
+					`INSERT INTO node_groups(node_id, group_id) VALUES (?, ?)`,
+					nodeID,
+					groupID,
+				); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(`UPDATE nodes SET updated_at=CURRENT_TIMESTAMP WHERE id IN (%s)`, placeholders(len(nodeIDs))),
+		int64Args(nodeIDs)...,
+	); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return nodeCount, nil
 }
 
 func (s *Store) nodeGroups(ctx context.Context, id int64) ([]int64, error) {
@@ -845,4 +1052,16 @@ func scanNode(row scanner) (model.Node, error) {
 		node.SubscriptionID = &subscriptionID.Int64
 	}
 	return node, nil
+}
+
+func placeholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func int64Args(values []int64) []any {
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+	return result
 }

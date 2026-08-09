@@ -273,6 +273,236 @@ func TestSubscriptionCRUDAPI(t *testing.T) {
 	}
 }
 
+func TestBatchNodeOperationsAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	handler := New(config.Config{SigningKey: "test-signing-key"}, database).Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin",
+		"password": "password",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not set a session cookie")
+	}
+
+	firstGroup, err := database.CreateGroup(context.Background(), "batch first", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGroup, err := database.CreateGroup(context.Background(), "batch second", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNode, err := database.SaveNode(context.Background(), model.Node{
+		Name:     "batch first",
+		Protocol: "socks5",
+		Server:   "first.example.com",
+		Port:     1080,
+		Username: "first",
+		Password: "password",
+		GroupIDs: []int64{firstGroup.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondNode, err := database.SaveNode(context.Background(), model.Node{
+		Name:     "batch second",
+		Protocol: "socks5",
+		Server:   "second.example.com",
+		Port:     1080,
+		Username: "second",
+		Password: "password",
+		GroupIDs: []int64{firstGroup.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeIDs := []int64{secondNode.ID, firstNode.ID}
+
+	uriResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/nodes/export",
+		map[string]any{"ids": nodeIDs, "format": "uri"},
+		cookies[0],
+	)
+	if uriResponse.Code != http.StatusOK {
+		t.Fatalf("URI export status = %d body=%s", uriResponse.Code, uriResponse.Body.String())
+	}
+	var uriExport struct {
+		Content string `json:"content"`
+		Count   int    `json:"count"`
+	}
+	if err := json.NewDecoder(uriResponse.Body).Decode(&uriExport); err != nil {
+		t.Fatal(err)
+	}
+	uriLines := strings.Split(uriExport.Content, "\n")
+	if uriExport.Count != 2 || len(uriLines) != 2 {
+		t.Fatalf("unexpected URI export: %#v", uriExport)
+	}
+	firstURI, err := url.Parse(uriLines[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondURI, err := url.Parse(uriLines[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstURI.Fragment != secondNode.Name || secondURI.Fragment != firstNode.Name {
+		t.Fatalf("export order = %q, %q", firstURI.Fragment, secondURI.Fragment)
+	}
+
+	base64Response := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/nodes/export",
+		map[string]any{"ids": nodeIDs, "format": "base64"},
+		cookies[0],
+	)
+	if base64Response.Code != http.StatusOK {
+		t.Fatalf("Base64 export status = %d body=%s", base64Response.Code, base64Response.Body.String())
+	}
+	var base64Export struct {
+		Content string `json:"content"`
+		Count   int    `json:"count"`
+	}
+	if err := json.NewDecoder(base64Response.Body).Decode(&base64Export); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(base64Export.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base64Export.Count != 2 || string(decoded) != uriExport.Content {
+		t.Fatalf("unexpected Base64 export: %#v decoded=%q", base64Export, decoded)
+	}
+
+	groupResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPatch,
+		"/api/nodes/groups",
+		map[string]any{
+			"ids":       nodeIDs,
+			"group_ids": []int64{secondGroup.ID},
+			"mode":      "add",
+		},
+		cookies[0],
+	)
+	if groupResponse.Code != http.StatusOK {
+		t.Fatalf("group update status = %d body=%s", groupResponse.Code, groupResponse.Body.String())
+	}
+	for _, nodeID := range nodeIDs {
+		node, err := database.Node(context.Background(), nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(node.GroupIDs) != 2 ||
+			!containsInt64(node.GroupIDs, firstGroup.ID) ||
+			!containsInt64(node.GroupIDs, secondGroup.ID) {
+			t.Fatalf("node groups were not updated: %#v", node.GroupIDs)
+		}
+	}
+
+	subscription, err := database.CreateSubscription(
+		context.Background(),
+		"batch managed",
+		"https://example.com/subscription",
+		firstGroup.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReplaceSubscriptionNodes(
+		context.Background(),
+		subscription.ID,
+		firstGroup.ID,
+		[]model.Node{{
+			Name:     "managed",
+			Protocol: "socks5",
+			Server:   "managed.example.com",
+			Port:     1080,
+		}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	allNodes, err := database.Nodes(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var managedNode model.Node
+	for _, node := range allNodes {
+		if node.SubscriptionID != nil {
+			managedNode = node
+			break
+		}
+	}
+	if managedNode.ID == 0 {
+		t.Fatal("managed node was not created")
+	}
+	managedResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPatch,
+		"/api/nodes/groups",
+		map[string]any{
+			"ids":       []int64{managedNode.ID},
+			"group_ids": []int64{secondGroup.ID},
+			"mode":      "add",
+		},
+		cookies[0],
+	)
+	if managedResponse.Code != http.StatusBadRequest ||
+		!strings.Contains(managedResponse.Body.String(), "订阅托管节点") {
+		t.Fatalf(
+			"managed group update status = %d body=%s",
+			managedResponse.Code,
+			managedResponse.Body.String(),
+		)
+	}
+	if err := database.DeleteSubscription(context.Background(), subscription.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodDelete,
+		"/api/nodes",
+		map[string]any{"ids": nodeIDs},
+		cookies[0],
+	)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("batch delete status = %d body=%s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	var deleteResult struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.NewDecoder(deleteResponse.Body).Decode(&deleteResult); err != nil {
+		t.Fatal(err)
+	}
+	if deleteResult.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleteResult.Deleted)
+	}
+	nodes, err := database.Nodes(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("nodes still exist after batch delete: %#v", nodes)
+	}
+}
+
 func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
@@ -501,6 +731,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func containsInt64(values []int64, target int64) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func performJSONRequest(

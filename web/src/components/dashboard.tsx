@@ -91,6 +91,9 @@ import {
   api,
   type Group,
   type Node,
+  type NodeExportFormat,
+  type NodeExportResult,
+  type NodeGroupUpdateMode,
   type Share,
   type State,
   type Subscription,
@@ -137,6 +140,11 @@ const grpcModeItems = [
 const shareModeItems = [
   { label: "限时分享", value: "temporary" },
   { label: "永久分享", value: "permanent" },
+]
+const nodeGroupModeItems = [
+  { label: "添加到分组", value: "add" },
+  { label: "从分组移出", value: "remove" },
+  { label: "替换全部分组", value: "replace" },
 ]
 
 const blankNode: Node = {
@@ -288,17 +296,49 @@ function nestedGroupIDs(groups: Group[], rootID: number) {
   return result
 }
 
+async function copyText(value: string) {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(value)
+      return
+    } catch {
+      // Fall back for self-hosted HTTP deployments without Clipboard API access.
+    }
+  }
+  const textarea = document.createElement("textarea")
+  textarea.value = value
+  textarea.setAttribute("readonly", "")
+  textarea.style.position = "fixed"
+  textarea.style.opacity = "0"
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  const copied = document.execCommand("copy")
+  textarea.remove()
+  if (!copied) {
+    throw new Error("复制失败，请检查浏览器剪贴板权限")
+  }
+}
+
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">(
     "nodes",
   )
   const [groupFilter, setGroupFilter] = useState(0)
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
   const [groupOpen, setGroupOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [nodeOpen, setNodeOpen] = useState(false)
   const [subscriptionOpen, setSubscriptionOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [batchGroupOpen, setBatchGroupOpen] = useState(false)
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const [batchPending, setBatchPending] = useState(false)
+  const [copyingFormat, setCopyingFormat] = useState<NodeExportFormat | null>(
+    null,
+  )
+  const [selectedNodeIDs, setSelectedNodeIDs] = useState<Set<number>>(new Set())
   const [editingGroup, setEditingGroup] = useState<Group | null>(null)
   const [editingNode, setEditingNode] = useState<Node>(blankNode)
   const [editingSubscription, setEditingSubscription] =
@@ -316,14 +356,118 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       node.group_ids.some((groupID) => includedGroupIDs.has(groupID)),
     )
   }, [groupFilter, state.groups, state.nodes])
+  const selectedNodes = useMemo(
+    () => visibleNodes.filter((node) => selectedNodeIDs.has(node.id)),
+    [selectedNodeIDs, visibleNodes],
+  )
+  const selectedHasManagedNodes = selectedNodes.some(
+    (node) => node.subscription_id != null,
+  )
 
-  async function run(action: () => Promise<unknown>) {
+  async function run(
+    action: () => Promise<unknown>,
+    successMessage = "",
+  ): Promise<boolean> {
     setError("")
+    setNotice("")
     try {
       await action()
       await onReload()
+      if (successMessage) setNotice(successMessage)
+      return true
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "操作失败")
+      return false
+    }
+  }
+
+  function selectGroup(groupID: number) {
+    setGroupFilter(groupID)
+    setSelectedNodeIDs(new Set())
+  }
+
+  function openBatchGroups() {
+    setError("")
+    setNotice("")
+    setBatchGroupOpen(true)
+  }
+
+  function openBatchDelete() {
+    setError("")
+    setNotice("")
+    setBatchDeleteOpen(true)
+  }
+
+  async function copySelectedNodes(format: NodeExportFormat) {
+    const ids = selectedNodes.map((node) => node.id)
+    if (ids.length === 0) return
+    setError("")
+    setNotice("")
+    setCopyingFormat(format)
+    try {
+      const result = await api<NodeExportResult>("/api/nodes/export", {
+        method: "POST",
+        body: JSON.stringify({ ids, format }),
+      })
+      await copyText(result.content)
+      setNotice(
+        `已复制 ${result.count} 个节点的${
+          format === "uri" ? " URI" : " Base64"
+        } 内容。`,
+      )
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "复制失败")
+    } finally {
+      setCopyingFormat(null)
+    }
+  }
+
+  async function updateSelectedNodeGroups(
+    mode: NodeGroupUpdateMode,
+    groupIDs: number[],
+  ) {
+    const ids = selectedNodes.map((node) => node.id)
+    if (ids.length === 0) return false
+    setBatchPending(true)
+    try {
+      const updated = await run(
+        () =>
+          api("/api/nodes/groups", {
+            method: "PATCH",
+            body: JSON.stringify({
+              ids,
+              group_ids: groupIDs,
+              mode,
+            }),
+          }),
+        `已更新 ${ids.length} 个节点的分组。`,
+      )
+      if (updated) setSelectedNodeIDs(new Set())
+      return updated
+    } finally {
+      setBatchPending(false)
+    }
+  }
+
+  async function deleteSelectedNodes() {
+    const ids = selectedNodes.map((node) => node.id)
+    if (ids.length === 0) return
+    setBatchPending(true)
+    try {
+      const deleted = await run(
+        () =>
+          api("/api/nodes", {
+            method: "DELETE",
+            body: JSON.stringify({ ids }),
+          }),
+        `已删除 ${ids.length} 个节点。`,
+      )
+      if (deleted) {
+        setBatchDeleteOpen(false)
+        setSelectedNodeIDs(new Set())
+      }
+    } finally {
+      setBatchPending(false)
     }
   }
 
@@ -400,7 +544,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
               <Button
                 variant={groupFilter === 0 ? "secondary" : "ghost"}
                 className="justify-between"
-                onClick={() => setGroupFilter(0)}
+                onClick={() => selectGroup(0)}
               >
                 <span className="flex items-center gap-2">
                   <ServerIcon data-icon="inline-start" />
@@ -418,7 +562,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                         ? `包含 ${group.child_group_ids.length} 个下级分组`
                         : undefined
                     }
-                    onClick={() => setGroupFilter(group.id)}
+                    onClick={() => selectGroup(group.id)}
                   >
                     <span className="truncate">{group.name}</span>
                     <Badge variant="outline">{group.node_count}</Badge>
@@ -497,11 +641,19 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           ) : null}
+          {notice ? (
+            <Alert className="mb-4">
+              <AlertTitle>操作完成</AlertTitle>
+              <AlertDescription>{notice}</AlertDescription>
+            </Alert>
+          ) : null}
           <Tabs
             value={activeTab}
-            onValueChange={(value) =>
-              setActiveTab(value as "nodes" | "subscriptions")
-            }
+            onValueChange={(value) => {
+              const next = value as "nodes" | "subscriptions"
+              setActiveTab(next)
+              if (next !== "nodes") setSelectedNodeIDs(new Set())
+            }}
           >
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <TabsList>
@@ -531,6 +683,13 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
               <NodeTable
                 nodes={visibleNodes}
                 groups={state.groups}
+                selectedNodeIDs={selectedNodeIDs}
+                selectedHasManagedNodes={selectedHasManagedNodes}
+                copyingFormat={copyingFormat}
+                onSelectionChange={setSelectedNodeIDs}
+                onBatchGroups={openBatchGroups}
+                onBatchDelete={openBatchDelete}
+                onBatchCopy={copySelectedNodes}
                 onEdit={(node) => {
                   setEditingNode({ ...node })
                   setNodeOpen(true)
@@ -618,6 +777,30 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
         onOpenChange={setShareOpen}
         onGenerated={onReload}
       />
+      <BatchGroupDialog
+        key={`batch-groups-${batchGroupOpen}`}
+        open={batchGroupOpen}
+        groups={state.groups}
+        selectedCount={selectedNodes.length}
+        error={error}
+        pending={batchPending}
+        onOpenChange={(open) => {
+          setBatchGroupOpen(open)
+          if (!open) setError("")
+        }}
+        onApply={updateSelectedNodeGroups}
+      />
+      <BatchDeleteDialog
+        open={batchDeleteOpen}
+        selectedCount={selectedNodes.length}
+        error={error}
+        pending={batchPending}
+        onOpenChange={(open) => {
+          setBatchDeleteOpen(open)
+          if (!open) setError("")
+        }}
+        onConfirm={deleteSelectedNodes}
+      />
     </div>
   )
 }
@@ -625,6 +808,13 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
 function NodeTable({
   nodes,
   groups,
+  selectedNodeIDs,
+  selectedHasManagedNodes,
+  copyingFormat,
+  onSelectionChange,
+  onBatchGroups,
+  onBatchDelete,
+  onBatchCopy,
   onEdit,
   onDelete,
   onShare,
@@ -632,11 +822,40 @@ function NodeTable({
 }: {
   nodes: Node[]
   groups: Group[]
+  selectedNodeIDs: Set<number>
+  selectedHasManagedNodes: boolean
+  copyingFormat: NodeExportFormat | null
+  onSelectionChange: (ids: Set<number>) => void
+  onBatchGroups: () => void
+  onBatchDelete: () => void
+  onBatchCopy: (format: NodeExportFormat) => Promise<void>
   onEdit: (node: Node) => void
   onDelete: (node: Node) => void
   onShare: (node: Node) => void
   onCreate: () => void
 }) {
+  const selectedCount = nodes.filter((node) =>
+    selectedNodeIDs.has(node.id),
+  ).length
+  const allSelected = selectedCount === nodes.length && nodes.length > 0
+  const someSelected = selectedCount > 0 && !allSelected
+
+  function selectAll(checked: boolean) {
+    const next = new Set(selectedNodeIDs)
+    for (const node of nodes) {
+      if (checked) next.add(node.id)
+      else next.delete(node.id)
+    }
+    onSelectionChange(next)
+  }
+
+  function selectNode(nodeID: number, checked: boolean) {
+    const next = new Set(selectedNodeIDs)
+    if (checked) next.add(nodeID)
+    else next.delete(nodeID)
+    onSelectionChange(next)
+  }
+
   if (nodes.length === 0) {
     return (
       <Card>
@@ -666,13 +885,80 @@ function NodeTable({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>节点列表</CardTitle>
-        <CardDescription>点击行可修改协议和传输配置。</CardDescription>
+        <div className="flex flex-col gap-3">
+          <div>
+            <CardTitle>节点列表</CardTitle>
+            <CardDescription>
+              点击行可修改协议和传输配置；勾选后可批量操作。
+            </CardDescription>
+          </div>
+          {selectedCount > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">已选择 {selectedCount} 个</Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={selectedHasManagedNodes}
+                title={
+                  selectedHasManagedNodes
+                    ? "订阅托管节点的分组由订阅决定"
+                    : undefined
+                }
+                onClick={onBatchGroups}
+              >
+                <PencilIcon data-icon="inline-start" />
+                修改分组
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={copyingFormat !== null}
+                onClick={() => onBatchCopy("uri")}
+              >
+                <LinkIcon data-icon="inline-start" />
+                {copyingFormat === "uri" ? "复制中…" : "复制 URI"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={copyingFormat !== null}
+                onClick={() => onBatchCopy("base64")}
+              >
+                <Code2Icon data-icon="inline-start" />
+                {copyingFormat === "base64" ? "复制中…" : "复制 Base64"}
+              </Button>
+              <Button variant="destructive" size="sm" onClick={onBatchDelete}>
+                <Trash2Icon data-icon="inline-start" />
+                删除
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onSelectionChange(new Set())}
+              >
+                取消选择
+              </Button>
+              {selectedHasManagedNodes ? (
+                <span className="text-xs text-muted-foreground">
+                  订阅托管节点不能修改分组。
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  aria-label="选择全部可见节点"
+                  checked={allSelected}
+                  indeterminate={someSelected}
+                  onCheckedChange={selectAll}
+                />
+              </TableHead>
               <TableHead>名称</TableHead>
               <TableHead>协议</TableHead>
               <TableHead>地址</TableHead>
@@ -687,8 +973,18 @@ function NodeTable({
               <TableRow
                 key={node.id}
                 className="cursor-pointer"
+                data-state={
+                  selectedNodeIDs.has(node.id) ? "selected" : undefined
+                }
                 onClick={() => onEdit(node)}
               >
+                <TableCell onClick={(event) => event.stopPropagation()}>
+                  <Checkbox
+                    aria-label={`选择节点 ${node.name}`}
+                    checked={selectedNodeIDs.has(node.id)}
+                    onCheckedChange={(checked) => selectNode(node.id, checked)}
+                  />
+                </TableCell>
                 <TableCell className="font-medium">{node.name}</TableCell>
                 <TableCell>
                   <Badge variant="secondary">
@@ -744,6 +1040,212 @@ function NodeTable({
         </Table>
       </CardContent>
     </Card>
+  )
+}
+
+function BatchGroupDialog({
+  open,
+  groups,
+  selectedCount,
+  error,
+  pending,
+  onOpenChange,
+  onApply,
+}: {
+  open: boolean
+  groups: Group[]
+  selectedCount: number
+  error: string
+  pending: boolean
+  onOpenChange: (open: boolean) => void
+  onApply: (mode: NodeGroupUpdateMode, groupIDs: number[]) => Promise<boolean>
+}) {
+  const [mode, setMode] = useState<NodeGroupUpdateMode>("add")
+  const [groupIDs, setGroupIDs] = useState<number[]>([])
+  const [validationError, setValidationError] = useState("")
+  const modeDescription = {
+    add: "保留现有分组，并把所选节点加入勾选分组。",
+    remove: "仅从勾选分组移出，其他分组保持不变。",
+    replace: "将直接分组替换为勾选结果；不勾选会清空全部分组。",
+  }[mode]
+
+  function setGroup(groupID: number, checked: boolean) {
+    setGroupIDs((current) =>
+      checked
+        ? [...new Set([...current, groupID])]
+        : current.filter((candidate) => candidate !== groupID),
+    )
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setValidationError("")
+    if (mode !== "replace" && groupIDs.length === 0) {
+      setValidationError("请至少选择一个分组")
+      return
+    }
+    if (await onApply(mode, groupIDs)) {
+      onOpenChange(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!pending) onOpenChange(next)
+      }}
+    >
+      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-xl">
+        <form className="flex flex-col gap-4" onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>批量修改分组</DialogTitle>
+            <DialogDescription>
+              将对已选择的 {selectedCount} 个节点修改直接所属分组。
+            </DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel>修改方式</FieldLabel>
+              <Select
+                items={nodeGroupModeItems}
+                value={mode}
+                disabled={pending}
+                onValueChange={(value) => {
+                  if (
+                    value === "add" ||
+                    value === "remove" ||
+                    value === "replace"
+                  ) {
+                    setMode(value)
+                    setValidationError("")
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent alignItemWithTrigger={false}>
+                  <SelectGroup>
+                    {nodeGroupModeItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>{modeDescription}</FieldDescription>
+            </Field>
+            <FieldSet>
+              <FieldLegend variant="label">选择分组</FieldLegend>
+              {groups.length > 0 ? (
+                <FieldGroup className="max-h-64 overflow-y-auto rounded-lg border p-3">
+                  {groups.map((group) => {
+                    const checkboxID = `batch-node-group-${group.id}`
+                    return (
+                      <Field key={group.id} orientation="horizontal">
+                        <Checkbox
+                          id={checkboxID}
+                          checked={groupIDs.includes(group.id)}
+                          disabled={pending}
+                          onCheckedChange={(checked) =>
+                            setGroup(group.id, checked)
+                          }
+                        />
+                        <FieldLabel
+                          htmlFor={checkboxID}
+                          className="font-normal"
+                        >
+                          {group.name}
+                        </FieldLabel>
+                      </Field>
+                    )
+                  })}
+                </FieldGroup>
+              ) : (
+                <FieldDescription>
+                  暂无分组；使用“替换全部分组”可清空节点分组。
+                </FieldDescription>
+              )}
+            </FieldSet>
+          </FieldGroup>
+          {validationError || error ? (
+            <Alert variant="destructive">
+              <AlertDescription>{validationError || error}</AlertDescription>
+            </Alert>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() => onOpenChange(false)}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={pending || selectedCount === 0}>
+              {pending ? "保存中…" : "应用修改"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function BatchDeleteDialog({
+  open,
+  selectedCount,
+  error,
+  pending,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean
+  selectedCount: number
+  error: string
+  pending: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => Promise<void>
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!pending) onOpenChange(next)
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>批量删除节点</DialogTitle>
+          <DialogDescription>
+            确定删除已选择的 {selectedCount} 个节点吗？此操作无法撤销。
+          </DialogDescription>
+        </DialogHeader>
+        {error ? (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+        <DialogFooter>
+          <Button
+            variant="outline"
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            取消
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={pending || selectedCount === 0}
+            onClick={onConfirm}
+          >
+            {pending ? "删除中…" : "确认删除"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
