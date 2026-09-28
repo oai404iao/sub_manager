@@ -26,7 +26,7 @@ package="sub-manager_${version}_linux_amd64"
 rm -rf "${dist:?}"
 mkdir -p "$dist/$package"
 
-npm --prefix "$root/web" run build
+pnpm -C "$root/web" run build
 
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go -C "$root" build -trimpath \

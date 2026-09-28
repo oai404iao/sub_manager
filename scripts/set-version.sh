@@ -10,6 +10,6 @@ if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 printf '%s\n' "$version" > "$root/VERSION"
-npm --prefix "$root/web" version "$version" --no-git-tag-version --allow-same-version >/dev/null
+pnpm -C "$root/web" pkg set "version=$version"
 
 echo "Version updated to $version."

@@ -3,10 +3,11 @@
 FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS web-builder
 
 WORKDIR /src
-COPY web/package.json web/package-lock.json ./web/
-RUN --mount=type=cache,target=/root/.npm npm --prefix web ci
+RUN npm install --global pnpm@12.4.1
+COPY web/package.json web/pnpm-lock.yaml ./web/
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm -C web install --frozen-lockfile
 COPY web ./web
-RUN npm --prefix web run build
+RUN pnpm -C web run build
 
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS go-builder
 

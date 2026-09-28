@@ -16,7 +16,7 @@ dev:
 	go run -ldflags "$(GO_LDFLAGS)" ./cmd/server
 
 web:
-	npm --prefix web run build
+	pnpm -C web run build
 
 build: web
 	mkdir -p "$(dir $(OUTPUT))"
@@ -24,20 +24,20 @@ build: web
 
 test:
 	go test ./cmd/... ./internal/...
-	npm --prefix web run typecheck
+	pnpm -C web run typecheck
 
 vet:
 	go vet ./cmd/... ./internal/...
 
 lint:
-	npm --prefix web run lint
+	pnpm -C web run lint
 
 test-xray:
 	XRAY_BIN="$${XRAY_BIN:-xray}" go test ./internal/protocol -run TestGeneratedOutboundWithOfficialXray -v
 
 fmt:
 	gofmt -w $$(find cmd internal -name '*.go')
-	npm --prefix web run format
+	pnpm -C web run format
 
 fmt-check:
 	@test -z "$$(gofmt -l cmd internal)" || \
