@@ -189,6 +189,20 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 		UDP:           query.Get("udp") == "" || parseBool(query.Get("udp")),
 		Extra:         extras(query, known),
 	}
+	if value, present := query["support-x25519mlkem768"]; present {
+		if node.Security != "reality" {
+			return model.Node{}, errors.New("support-x25519mlkem768 requires REALITY")
+		}
+		enabled, err := strconv.ParseBool(value[0])
+		if err != nil {
+			return model.Node{}, errors.New("invalid support-x25519mlkem768 value")
+		}
+		if enabled {
+			node.Extra["support-x25519mlkem768"] = "true"
+		} else {
+			delete(node.Extra, "support-x25519mlkem768")
+		}
+	}
 	if err := EnsureXrayOutbound(&node); err != nil {
 		return model.Node{}, err
 	}
@@ -360,6 +374,9 @@ func vlessURI(node model.Node) (string, error) {
 		set(query, "sid", stringFromMap(settings, "shortId"))
 		set(query, "pqv", stringFromMap(settings, "mldsa65Verify"))
 		set(query, "spx", stringFromMap(settings, "spiderX"))
+		if node.Extra["support-x25519mlkem768"] == "true" {
+			query.Set("support-x25519mlkem768", "true")
+		}
 	}
 	if finalmask, ok := stream["finalmask"]; ok && finalmask != nil {
 		encoded, err := encodeBase64JSON(finalmask)
@@ -369,6 +386,9 @@ func vlessURI(node model.Node) (string, error) {
 		set(query, "fm", encoded)
 	}
 	for key, value := range node.Extra {
+		if key == "support-x25519mlkem768" {
+			continue
+		}
 		if !query.Has(key) {
 			query.Set(key, value)
 		}
@@ -510,6 +530,9 @@ func parseMihomoProxies(proxies []map[string]any) ([]model.Node, bool, error) {
 				node.Security = "reality"
 				node.PublicKey = stringValue(reality["public-key"])
 				node.ShortID = stringValue(reality["short-id"])
+				if boolValue(reality["support-x25519mlkem768"]) {
+					node.Extra["support-x25519mlkem768"] = "true"
+				}
 			}
 			if options, ok := proxy["ws-opts"].(map[string]any); ok {
 				node.Path = stringValue(options["path"])

@@ -377,6 +377,24 @@ response version、method、path、status、reason 与多值 headers。
 | `extra` | Base64URL Raw 编码的 XHTTP extra JSON |
 | `fm` | Base64URL Raw 编码的 FinalMask JSON |
 
+### Mihomo 专用扩展
+
+`support-x25519mlkem768=true` **不是 Xray VLESS 分享链接提案的标准参数**，
+而是 Mihomo 识别的 REALITY 分享 URI 扩展。节点编辑器中的「Mihomo
+X25519-MLKEM768」选项开启时，仅对 `security=reality` 的 URI 添加该参数；
+关闭时省略。导入 Mihomo YAML 的
+`reality-opts.support-x25519mlkem768: true` 也会保留到分享 URI。示例：
+
+```text
+vless://<uuid>@example.com:443?security=reality&pbk=<password>&fp=chrome&support-x25519mlkem768=true#example
+```
+
+此选项保存在节点的 URI 扩展参数中，**不会写入 Xray
+`streamSettings.realitySettings`**；其他客户端可能忽略它。Mihomo 的开关
+只决定是否保留指纹提供的 X25519-MLKEM768 能力，不能保证所选指纹一定提供
+对应的 TLS key share。它不同于 `pqv`（REALITY ML-DSA-65 签名公钥）和
+`encryption=mlkem768x25519plus...`（VLESS Encryption）。
+
 URI 无法天然表达 Xray JSON 的全部字段，所以**完整无损导入/导出应使用 Xray
 JSON**；分享 URI 用于客户端通用订阅兼容。
 
@@ -408,4 +426,7 @@ JSON**；分享 URI 用于客户端通用订阅兼容。
 - 官方 VLESS outbound 文档：<https://xtls.github.io/en/config/outbounds/vless.html>
 - 官方 transport 文档：<https://xtls.github.io/en/config/transport.html>
 - VLESS 分享链接标准：<https://github.com/XTLS/Xray-core/discussions/716>
+- Mihomo REALITY 配置说明：<https://github.com/MetaCubeX/Meta-Docs/blob/main/docs/config/proxies/tls.en.md>
+- Mihomo VLESS URI 扩展解析：<https://github.com/MetaCubeX/mihomo/blob/Alpha/common/convert/v.go>
+- Mihomo REALITY 握手实现：<https://github.com/MetaCubeX/mihomo/blob/Alpha/component/tls/reality.go>
 - VLESS Encryption PR：<https://github.com/XTLS/Xray-core/pull/5067>

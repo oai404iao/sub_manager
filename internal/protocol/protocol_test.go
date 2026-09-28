@@ -32,6 +32,51 @@ func TestVLESSRealityRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVLESSMihomoMLKEMShareLink(t *testing.T) {
+	password := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	base := "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality&fp=chrome&pbk=" + password
+	node, err := ParseURI(base + "&support-x25519mlkem768=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Extra["support-x25519mlkem768"] != "true" {
+		t.Fatalf("Mihomo extension not preserved: %#v", node.Extra)
+	}
+	outbound, err := XrayOutboundJSON(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(outbound), "support-x25519mlkem768") {
+		t.Fatalf("Mihomo extension leaked into Xray outbound: %s", outbound)
+	}
+	output, err := URI(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "support-x25519mlkem768=true") {
+		t.Fatalf("Mihomo extension missing from URI: %s", output)
+	}
+	disabled, err := ParseURI(base + "&support-x25519mlkem768=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err = URI(disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, "support-x25519mlkem768") {
+		t.Fatalf("disabled Mihomo extension in URI: %s", output)
+	}
+	for _, raw := range []string{
+		base + "&support-x25519mlkem768=invalid",
+		strings.Replace(base, "security=reality", "security=tls", 1) + "&support-x25519mlkem768=true",
+	} {
+		if _, err := ParseURI(raw); err == nil {
+			t.Fatalf("expected invalid Mihomo extension to be rejected: %s", raw)
+		}
+	}
+}
+
 func TestVLESSXHTTPLinkFields(t *testing.T) {
 	extra := base64.RawURLEncoding.EncodeToString([]byte(`{"xPaddingBytes":"100-1000"}`))
 	finalmask := base64.RawURLEncoding.EncodeToString([]byte(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello"}}]}`))
@@ -143,6 +188,7 @@ proxies:
     reality-opts:
       public-key: ` + password + `
       short-id: ab
+      support-x25519mlkem768: true
 `
 	nodes, err := ParseText(input)
 	if err != nil {
@@ -150,6 +196,13 @@ proxies:
 	}
 	if len(nodes) != 1 || nodes[0].Security != "reality" || nodes[0].PublicKey != password {
 		t.Fatalf("unexpected nodes: %#v", nodes)
+	}
+	if nodes[0].Extra["support-x25519mlkem768"] != "true" {
+		t.Fatalf("Mihomo extension not imported: %#v", nodes[0].Extra)
+	}
+	output, err := URI(nodes[0])
+	if err != nil || !strings.Contains(output, "support-x25519mlkem768=true") {
+		t.Fatalf("Mihomo extension not exported: %q, %v", output, err)
 	}
 }
 

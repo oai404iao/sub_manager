@@ -82,12 +82,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import {
   api,
@@ -133,7 +128,7 @@ const flowItems = [
   },
 ]
 const xhttpModeItems = ["auto", "packet-up", "stream-up", "stream-one"].map(
-  (value) => ({ label: value, value }),
+  (value) => ({ label: value, value })
 )
 const grpcModeItems = [
   { label: "gun（默认）", value: "gun" },
@@ -164,7 +159,7 @@ const blankNode: Node = {
 
 function mergeNodeIntoXray(
   source: Record<string, unknown>,
-  node: Node,
+  node: Node
 ): Record<string, unknown> {
   const outbound = structuredClone(source)
   outbound.protocol = "vless"
@@ -272,7 +267,7 @@ function recordValue(value: unknown): Record<string, unknown> {
 function setText(
   target: Record<string, unknown>,
   key: string,
-  value: string | undefined,
+  value: string | undefined
 ) {
   if (value) target[key] = value
   else delete target[key]
@@ -317,9 +312,7 @@ async function copyText(value: string) {
 }
 
 export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
-  const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">(
-    "nodes",
-  )
+  const [activeTab, setActiveTab] = useState<"nodes" | "subscriptions">("nodes")
   const [groupFilter, setGroupFilter] = useState(0)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
@@ -332,7 +325,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const [batchPending, setBatchPending] = useState(false)
   const [copyingFormat, setCopyingFormat] = useState<NodeExportFormat | null>(
-    null,
+    null
   )
   const [selectedNodeIDs, setSelectedNodeIDs] = useState<Set<number>>(new Set())
   const [editingGroup, setEditingGroup] = useState<Group | null>(null)
@@ -349,25 +342,25 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
     if (groupFilter === 0) return state.nodes
     const includedGroupIDs = nestedGroupIDs(state.groups, groupFilter)
     return state.nodes.filter((node) =>
-      node.group_ids.some((groupID) => includedGroupIDs.has(groupID)),
+      node.group_ids.some((groupID) => includedGroupIDs.has(groupID))
     )
   }, [groupFilter, state.groups, state.nodes])
   const selectedNodes = useMemo(
     () => visibleNodes.filter((node) => selectedNodeIDs.has(node.id)),
-    [selectedNodeIDs, visibleNodes],
+    [selectedNodeIDs, visibleNodes]
   )
   const selectedHasManagedNodes = selectedNodes.some(
-    (node) => node.subscription_id != null,
+    (node) => node.subscription_id != null
   )
   const selectedSubscriptionCount = new Set(
     selectedNodes
       .map((node) => node.subscription_id)
-      .filter((id): id is number => id != null),
+      .filter((id): id is number => id != null)
   ).size
 
   async function run(
     action: () => Promise<unknown>,
-    successMessage = "",
+    successMessage = ""
   ): Promise<boolean> {
     setError("")
     setNotice("")
@@ -414,7 +407,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       setNotice(
         `已复制 ${result.count} 个节点的${
           format === "uri" ? " URI" : " Base64"
-        } 内容。`,
+        } 内容。`
       )
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "复制失败")
@@ -442,7 +435,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       setNotice(
         result.subscriptions > 0
           ? `已更新 ${result.updated} 个节点，并迁移 ${result.subscriptions} 条订阅。`
-          : `已更新 ${result.updated} 个节点的分组。`,
+          : `已更新 ${result.updated} 个节点的分组。`
       )
       setSelectedNodeIDs(new Set())
       return true
@@ -465,7 +458,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
             method: "DELETE",
             body: JSON.stringify({ ids }),
           }),
-        `已删除 ${ids.length} 个节点。`,
+        `已删除 ${ids.length} 个节点。`
       )
       if (deleted) {
         setBatchDeleteOpen(false)
@@ -534,11 +527,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
                 <CardTitle>分组</CardTitle>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={openNewGroup}
-                >
+                <Button variant="ghost" size="icon-sm" onClick={openNewGroup}>
                   <PlusIcon />
                   <span className="sr-only">新建分组</span>
                 </Button>
@@ -581,9 +570,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
                       <DropdownMenuGroup>
-                        <DropdownMenuItem
-                          onClick={() => openEditGroup(group)}
-                        >
+                        <DropdownMenuItem onClick={() => openEditGroup(group)}>
                           <PencilIcon />
                           编辑分组
                         </DropdownMenuItem>
@@ -601,7 +588,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                             run(() =>
                               api(`/api/groups/${group.id}`, {
                                 method: "DELETE",
-                              }),
+                              })
                             )
                           }
                         >
@@ -700,9 +687,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                   setNodeOpen(true)
                 }}
                 onDelete={(node) =>
-                  run(() =>
-                    api(`/api/nodes/${node.id}`, { method: "DELETE" }),
-                  )
+                  run(() => api(`/api/nodes/${node.id}`, { method: "DELETE" }))
                 }
                 onShare={(node) => openShare("node", node.id, node.name)}
                 onCreate={openNewNode}
@@ -717,14 +702,14 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
                   run(() =>
                     api(`/api/subscriptions/${item.id}/refresh`, {
                       method: "POST",
-                    }),
+                    })
                   )
                 }
                 onDelete={(item) =>
                   run(() =>
                     api(`/api/subscriptions/${item.id}`, {
                       method: "DELETE",
-                    }),
+                    })
                   )
                 }
                 onEdit={openEditSubscription}
@@ -775,7 +760,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
             ? state.shares.filter(
                 (share) =>
                   share.kind === shareTarget.kind &&
-                  share.target_id === shareTarget.id,
+                  share.target_id === shareTarget.id
               )
             : []
         }
@@ -841,7 +826,7 @@ function NodeTable({
   onCreate: () => void
 }) {
   const selectedCount = nodes.filter((node) =>
-    selectedNodeIDs.has(node.id),
+    selectedNodeIDs.has(node.id)
   ).length
   const allSelected = selectedCount === nodes.length && nodes.length > 0
   const someSelected = selectedCount > 0 && !allSelected
@@ -1073,7 +1058,7 @@ function BatchGroupDialog({
     setGroupIDs((current) =>
       checked
         ? [...new Set([...current, groupID])]
-        : current.filter((candidate) => candidate !== groupID),
+        : current.filter((candidate) => candidate !== groupID)
     )
   }
 
@@ -1346,11 +1331,7 @@ function SubscriptionList({
               </Alert>
             ) : null}
             <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onEdit(item)}
-              >
+              <Button variant="outline" size="sm" onClick={() => onEdit(item)}>
                 <PencilIcon data-icon="inline-start" />
                 编辑
               </Button>
@@ -1362,11 +1343,7 @@ function SubscriptionList({
                 <RefreshCwIcon data-icon="inline-start" />
                 刷新
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onDelete(item)}
-              >
+              <Button variant="ghost" size="sm" onClick={() => onDelete(item)}>
                 <Trash2Icon data-icon="inline-start" />
                 删除
               </Button>
@@ -1532,7 +1509,7 @@ function GroupDialog({
   const [name, setName] = useState(group?.name ?? "")
   const [description, setDescription] = useState(group?.description ?? "")
   const [childGroupIDs, setChildGroupIDs] = useState(
-    group?.child_group_ids ?? [],
+    group?.child_group_ids ?? []
   )
   const [error, setError] = useState("")
   const unavailableGroupIDs = useMemo(() => {
@@ -1540,20 +1517,20 @@ function GroupDialog({
     return new Set(
       groups
         .filter((candidate) =>
-          nestedGroupIDs(groups, candidate.id).has(group.id),
+          nestedGroupIDs(groups, candidate.id).has(group.id)
         )
-        .map((candidate) => candidate.id),
+        .map((candidate) => candidate.id)
     )
   }, [group, groups])
   const selectableGroups = groups.filter(
-    (candidate) => candidate.id !== group?.id,
+    (candidate) => candidate.id !== group?.id
   )
 
   function setChildGroup(groupID: number, checked: boolean) {
     setChildGroupIDs((current) =>
       checked
         ? [...new Set([...current, groupID])]
-        : current.filter((candidate) => candidate !== groupID),
+        : current.filter((candidate) => candidate !== groupID)
     )
   }
 
@@ -1733,15 +1710,13 @@ function ImportDialog({
           <DialogHeader>
             <DialogTitle>导入节点或订阅</DialogTitle>
             <DialogDescription>
-              支持 Mihomo/Xray YAML、VLESS/SOCKS5 URI，以及标准或
-              URL-safe Base64 订阅。
+              支持 Mihomo/Xray YAML、VLESS/SOCKS5 URI，以及标准或 URL-safe
+              Base64 订阅。
             </DialogDescription>
           </DialogHeader>
           <Tabs
             value={mode}
-            onValueChange={(value) =>
-              setMode(value as "raw" | "subscription")
-            }
+            onValueChange={(value) => setMode(value as "raw" | "subscription")}
           >
             <TabsList>
               <TabsTrigger value="raw">粘贴内容</TabsTrigger>
@@ -1754,8 +1729,10 @@ function ImportDialog({
                 </FieldLabel>
                 <Textarea
                   id="import-content"
-                  className="min-h-48 max-h-[50svh] resize-y font-mono text-xs"
-                  placeholder={"vless://...\nsocks5://...\n\n或粘贴 YAML / Base64 订阅"}
+                  className="max-h-[50svh] min-h-48 resize-y font-mono text-xs"
+                  placeholder={
+                    "vless://...\nsocks5://...\n\n或粘贴 YAML / Base64 订阅"
+                  }
                   required
                   spellCheck={false}
                   wrap="soft"
@@ -1780,18 +1757,14 @@ function ImportDialog({
                   />
                 </Field>
                 <Field>
-                  <FieldLabel htmlFor="subscription-url">
-                    订阅 URL
-                  </FieldLabel>
+                  <FieldLabel htmlFor="subscription-url">订阅 URL</FieldLabel>
                   <Input
                     id="subscription-url"
                     type="url"
                     required
                     placeholder="https://example.com/subscription"
                     value={subscriptionURL}
-                    onChange={(event) =>
-                      setSubscriptionURL(event.target.value)
-                    }
+                    onChange={(event) => setSubscriptionURL(event.target.value)}
                   />
                   <FieldDescription>
                     为防 SSRF，服务端拒绝私网和保留地址。
@@ -1855,14 +1828,12 @@ function SubscriptionDialog({
 }) {
   const [name, setName] = useState(subscription?.name ?? "")
   const [subscriptionURL, setSubscriptionURL] = useState(
-    subscription?.url ?? "",
+    subscription?.url ?? ""
   )
   const [groupID, setGroupID] = useState(subscription?.group_id ?? 0)
   const [error, setError] = useState("")
   const groupItems = [
-    ...(subscription
-      ? []
-      : [{ label: "按订阅名称自动创建分组", value: "0" }]),
+    ...(subscription ? [] : [{ label: "按订阅名称自动创建分组", value: "0" }]),
     ...groups.map((group) => ({
       label: group.name,
       value: String(group.id),
@@ -1884,7 +1855,7 @@ function SubscriptionDialog({
             url: subscriptionURL,
             group_id: groupID,
           }),
-        },
+        }
       )
       onOpenChange(false)
       await onSaved()
@@ -1898,9 +1869,7 @@ function SubscriptionDialog({
       <DialogContent className="max-h-[90svh] overflow-x-hidden overflow-y-auto sm:max-w-xl">
         <form className="flex flex-col gap-4" onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>
-              {subscription ? "编辑订阅" : "新建订阅"}
-            </DialogTitle>
+            <DialogTitle>{subscription ? "编辑订阅" : "新建订阅"}</DialogTitle>
             <DialogDescription>
               保存后会立即拉取订阅，并替换该订阅上一次同步的节点。
             </DialogDescription>
@@ -1993,11 +1962,7 @@ function NodeDialog({
   const [error, setError] = useState("")
   const [editorMode, setEditorMode] = useState<"basic" | "advanced">("basic")
   const [advancedJSON, setAdvancedJSON] = useState(() =>
-    JSON.stringify(
-      node.xray_outbound ?? mergeNodeIntoXray({}, node),
-      null,
-      2,
-    ),
+    JSON.stringify(node.xray_outbound ?? mergeNodeIntoXray({}, node), null, 2)
   )
 
   function update<K extends keyof Node>(key: K, value: Node[K]) {
@@ -2045,7 +2010,7 @@ function NodeDialog({
           ? `Xray JSON 无效：${caught.message}`
           : caught instanceof Error
             ? caught.message
-            : "保存失败",
+            : "保存失败"
       )
     }
   }
@@ -2063,8 +2028,7 @@ function NodeDialog({
           <DialogHeader>
             <DialogTitle>{draft.id ? "编辑节点" : "新建节点"}</DialogTitle>
             <DialogDescription>
-              VLESS 对齐 Xray-core v26.7.28；完整字段可在高级 JSON
-              中编辑。
+              VLESS 对齐 Xray-core v26.7.28；完整字段可在高级 JSON 中编辑。
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -2200,11 +2164,15 @@ function NodeDialog({
                         unknown
                       >
                       setAdvancedJSON(
-                        JSON.stringify(mergeNodeIntoXray(current, draft), null, 2),
+                        JSON.stringify(
+                          mergeNodeIntoXray(current, draft),
+                          null,
+                          2
+                        )
                       )
                     } catch {
                       setAdvancedJSON(
-                        JSON.stringify(mergeNodeIntoXray({}, draft), null, 2),
+                        JSON.stringify(mergeNodeIntoXray({}, draft), null, 2)
                       )
                     }
                   }
@@ -2221,15 +2189,11 @@ function NodeDialog({
                 <TabsContent value="basic" className="mt-4">
                   <FieldGroup className="grid gap-4 sm:grid-cols-2">
                     <Field className="sm:col-span-2">
-                      <FieldLabel htmlFor="node-uuid">
-                        ID / UUID
-                      </FieldLabel>
+                      <FieldLabel htmlFor="node-uuid">ID / UUID</FieldLabel>
                       <Input
                         id="node-uuid"
                         value={draft.uuid ?? ""}
-                        onChange={(event) =>
-                          update("uuid", event.target.value)
-                        }
+                        onChange={(event) => update("uuid", event.target.value)}
                       />
                       <FieldDescription>
                         可使用 UUID，或不超过 30 字节的自定义字符串；分享时按
@@ -2249,8 +2213,8 @@ function NodeDialog({
                         }
                       />
                       <FieldDescription>
-                        必须填写；关闭时为 none。新加密格式以
-                        mlkem768x25519plus 开头。
+                        必须填写；关闭时为 none。新加密格式以 mlkem768x25519plus
+                        开头。
                       </FieldDescription>
                     </Field>
                     <Field>
@@ -2286,9 +2250,7 @@ function NodeDialog({
                             ...current,
                             network: value ?? undefined,
                             security:
-                              value === "hysteria"
-                                ? "tls"
-                                : current.security,
+                              value === "hysteria" ? "tls" : current.security,
                           }))
                         }
                       >
@@ -2334,8 +2296,8 @@ function NodeDialog({
                       <Alert variant="destructive" className="sm:col-span-2">
                         <AlertTitle>公开地址禁止明文 VLESS</AlertTitle>
                         <AlertDescription>
-                          Xray-core v26.7.28 要求公开服务端使用 TLS、REALITY
-                          或 VLESS Encryption。
+                          Xray-core v26.7.28 要求公开服务端使用 TLS、REALITY 或
+                          VLESS Encryption。
                         </AlertDescription>
                       </Alert>
                     ) : null}
@@ -2382,7 +2344,7 @@ function NodeDialog({
                                 event.target.value
                                   .split(",")
                                   .map((value) => value.trim())
-                                  .filter(Boolean),
+                                  .filter(Boolean)
                               )
                             }
                           />
@@ -2397,7 +2359,7 @@ function NodeDialog({
                             onChange={(event) =>
                               update(
                                 "verify_peer_cert_by_name",
-                                event.target.value,
+                                event.target.value
                               )
                             }
                           />
@@ -2413,7 +2375,7 @@ function NodeDialog({
                             onChange={(event) =>
                               update(
                                 "pinned_peer_cert_sha256",
-                                event.target.value,
+                                event.target.value
                               )
                             }
                           />
@@ -2491,11 +2453,42 @@ function NodeDialog({
                             }
                           />
                         </Field>
+                        <Field
+                          className="sm:col-span-2"
+                          orientation="horizontal"
+                        >
+                          <Checkbox
+                            id="node-mihomo-mlkem"
+                            checked={
+                              draft.extra?.["support-x25519mlkem768"] === "true"
+                            }
+                            onCheckedChange={(checked) =>
+                              setDraft((current) => {
+                                const extra = { ...current.extra }
+                                if (checked) {
+                                  extra["support-x25519mlkem768"] = "true"
+                                } else {
+                                  delete extra["support-x25519mlkem768"]
+                                }
+                                return { ...current, extra }
+                              })
+                            }
+                          />
+                          <FieldContent>
+                            <FieldLabel htmlFor="node-mihomo-mlkem">
+                              Mihomo X25519-MLKEM768
+                            </FieldLabel>
+                            <FieldDescription>
+                              仅在 REALITY 分享链接中添加 Mihomo 专用参数；不是
+                              Xray JSON 字段。
+                            </FieldDescription>
+                          </FieldContent>
+                        </Field>
                       </>
                     ) : null}
 
                     {["websocket", "httpupgrade", "xhttp"].includes(
-                      draft.network ?? "",
+                      draft.network ?? ""
                     ) ? (
                       <>
                         <Field>
@@ -2648,7 +2641,8 @@ function NodeDialog({
                       <Alert className="sm:col-span-2">
                         <AlertTitle>Hysteria 传输需要 TLS</AlertTitle>
                         <AlertDescription>
-                          auth、masquerade 与 QUIC 参数请在“Xray 完整 JSON”中配置。
+                          auth、masquerade 与 QUIC 参数请在“Xray 完整
+                          JSON”中配置。
                         </AlertDescription>
                       </Alert>
                     ) : null}
@@ -2680,9 +2674,7 @@ function NodeDialog({
                   <Input
                     id="node-username"
                     value={draft.username ?? ""}
-                    onChange={(event) =>
-                      update("username", event.target.value)
-                    }
+                    onChange={(event) => update("username", event.target.value)}
                   />
                 </Field>
                 <Field>
@@ -2691,9 +2683,7 @@ function NodeDialog({
                     id="node-password"
                     type="password"
                     value={draft.password ?? ""}
-                    onChange={(event) =>
-                      update("password", event.target.value)
-                    }
+                    onChange={(event) => update("password", event.target.value)}
                   />
                 </Field>
                 <Field>
@@ -2745,10 +2735,10 @@ function ShareDialog({
   onGenerated: () => Promise<void>
 }) {
   const [activeSection, setActiveSection] = useState<"create" | "history">(
-    "create",
+    "create"
   )
   const [shareMode, setShareMode] = useState<"temporary" | "permanent">(
-    "temporary",
+    "temporary"
   )
   const [expiresHours, setExpiresHours] = useState(720)
   const [generatedShare, setGeneratedShare] = useState<Share | null>(null)
@@ -2812,7 +2802,7 @@ function ShareDialog({
       setShareAction(null)
     } catch (caught) {
       setManagementError(
-        caught instanceof Error ? caught.message : "管理分享记录失败",
+        caught instanceof Error ? caught.message : "管理分享记录失败"
       )
     } finally {
       setManagementPending(false)
