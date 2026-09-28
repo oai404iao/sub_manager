@@ -45,7 +45,8 @@ if git -C "$root" ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/nul
   exit 1
 fi
 
-npm --prefix "$root/web" ci
+pnpm -C "$root/web" install --frozen-lockfile
+pnpm -C "$root/web" audit --audit-level=low
 make -C "$root" ci
 "$root/scripts/build-release.sh" "$version"
 if [[ -n $(git -C "$root" status --porcelain) ]]; then

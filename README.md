@@ -65,13 +65,15 @@ VLESS 实现基线为 **Xray-core v26.7.28**。字段范围、兼容规则与上
 
 - Go `1.26`
 - Node.js `24`
-- npm
+- pnpm `12.4.1`
+
+尚未安装 pnpm 时，可使用 `npm install --global pnpm@12.4.1` 安装。
 
 ```bash
 git clone https://github.com/oai404iao/sub_manager.git
 cd sub_manager
 
-npm --prefix web ci
+pnpm -C web install --frozen-lockfile
 make build
 ./bin/sub-manager
 ```
@@ -116,7 +118,7 @@ set +a
 make dev
 
 # Terminal 2: Vite
-npm --prefix web run dev
+pnpm -C web run dev
 ```
 
 Vite 会将 `/api` 与 `/s` 代理到 `127.0.0.1:8080`。
@@ -247,7 +249,7 @@ curl http://127.0.0.1:8080/api/version
 | 命令 | 用途 |
 | --- | --- |
 | `make dev` | 启动 Go API |
-| `npm --prefix web run dev` | 启动 Vite 开发服务器 |
+| `pnpm -C web run dev` | 启动 Vite 开发服务器 |
 | `make build` | 构建前端并生成 `bin/sub-manager` |
 | `make test` | 运行 Go 测试和 TypeScript 类型检查 |
 | `make vet` | 运行 `go vet` |
@@ -268,7 +270,8 @@ XRAY_BIN=/path/to/xray make test-xray
 
 - `VERSION`
 - `web/package.json`
-- `web/package-lock.json`
+
+前端依赖由 `web/pnpm-lock.yaml` 锁定；安装时使用 `--frozen-lockfile`。
 
 准备新版本：
 
@@ -308,7 +311,8 @@ GHCR 镜像、SBOM、构建来源证明与 GitHub Release。
 欢迎通过 Issue 与 Pull Request 改进项目。提交前请至少执行：
 
 ```bash
-npm --prefix web ci
+pnpm -C web install --frozen-lockfile
+pnpm -C web audit --audit-level=low
 make ci
 ```
 

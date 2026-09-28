@@ -55,8 +55,8 @@ sub_manager/
 ## Workspace / Package Rules
 
 - 根目录是 Go module：`github.com/oai404iao/sub_manager`。
-- `web/` 是独立 npm package；包管理器是 npm，锁文件是
-  `web/package-lock.json`。依赖命令使用 `npm --prefix web ...`。
+- `web/` 是独立 pnpm package；包管理器是 pnpm `12.4.1`，锁文件是
+  `web/pnpm-lock.yaml`。依赖命令使用 `pnpm -C web ...`。
 - CI 与 Docker 使用 Go `1.26`、Node.js `24`。不要无依据降低或提高版本。
 - 使用 `Makefile` 中的范围化 Go 命令。不要将 `go test ./...` 作为权威命令；
   安装前端依赖后，`web/node_modules` 内可能出现可被 Go 发现的第三方目录。
@@ -64,22 +64,23 @@ sub_manager/
   规则读取根目录 `.env`。
 - `bin/`、`data/`、`dist/`、`.env`、`web/node_modules/` 是本地产物，不应提交。
 - Vite 的生产输出目录是 `internal/webassets/dist`。不要手改该目录；通过
-  `npm --prefix web run build` 或 `make build` 生成。`index.html` 是被跟踪的
+  `pnpm -C web run build` 或 `make build` 生成。`index.html` 是被跟踪的
   生成文件，前端变更后应重建并检查其 diff；哈希资源由构建时重新生成。
-- `VERSION`、`web/package.json`、`web/package-lock.json` 必须同步。使用
-  `./scripts/set-version.sh X.Y.Z`，不要只改其中一个文件。
+- `VERSION` 与 `web/package.json` 的版本必须同步。`web/pnpm-lock.yaml`
+  锁定依赖而不记录项目版本。使用 `./scripts/set-version.sh X.Y.Z`，
+  不要只改其中一个版本文件。
 
 ## Build, Test & Dev Commands
 
 ```bash
 # 首次安装前端依赖
-npm --prefix web ci
+pnpm -C web install --frozen-lockfile
 
 # 后端开发（使用版本 ldflags）
 make dev
 
 # 前端开发；/api 与 /s 代理到 127.0.0.1:8080
-npm --prefix web run dev
+pnpm -C web run dev
 
 # 生产构建：先构建前端，再生成 bin/sub-manager
 make build
@@ -247,10 +248,10 @@ Xray 基线，应以一手代码为依据，并成组更新常量、文档、校
 `subscriptions.group_id` 使用 `ON DELETE RESTRICT`。仍被订阅引用的分组不能删除，
 API 当前将此类错误映射为用户可读的 `400`。
 
-### 7. 版本需要三处同步
+### 7. 版本需要两处同步
 
-发布 workflow 会同时核对 `VERSION`、`web/package.json` 和
-`web/package-lock.json`。手动只改一处会使发布失败。
+发布 workflow 会核对 `VERSION` 和 `web/package.json`。修改依赖时还需
+同步更新 `web/pnpm-lock.yaml`；发布使用 `--frozen-lockfile` 校验。
 
 ### 8. `go test ./...` 不是本项目的标准检查
 
@@ -294,7 +295,7 @@ API 当前将此类错误映射为用户可读的 `400`。
 
 1. 更新 `CHANGELOG.md`。
 2. 运行 `./scripts/set-version.sh X.Y.Z`。
-3. 运行 `npm --prefix web ci && make ci`。
+3. 运行 `pnpm -C web install --frozen-lockfile && pnpm -C web audit --audit-level=low && make ci`。
 4. 确认 `main`、`origin/main`、工作区均干净且同步。
 5. 运行 `./scripts/release.sh X.Y.Z`；脚本会创建并推送带注释标签。
 
@@ -308,7 +309,7 @@ API 当前将此类错误映射为用户可读的 `400`。
 | Share | `internal/share/signer_test.go` | 签名与篡改拒绝 |
 | Version | `internal/version/version_test.go` | ldflags fallback 与字符串格式 |
 | Upstream | `make test-xray` | 可选；调用官方 Xray-core v26.7.28 `run -test` |
-| Frontend | npm scripts | 目前仅 typecheck、ESLint、Prettier 与 Vite build |
+| Frontend | pnpm scripts | 目前仅 typecheck、ESLint、Prettier 与 Vite build |
 | Container | `.github/workflows/ci.yml` | 构建镜像、检查 `--version`、等待 healthcheck |
 
 优先写靠近变更层的测试。协议修复应加入最小回归 fixture；Store/API 测试不得依赖
