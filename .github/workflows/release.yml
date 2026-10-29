@@ -62,7 +62,14 @@ jobs:
         run: pnpm -C web install --frozen-lockfile
 
       - name: Audit frontend dependencies
-        run: pnpm -C web audit --audit-level=low
+        shell: bash
+        run: |
+          args=(--audit-level=low)
+          # 0.1.6 ships with the documented, unpatched deepmerge advisory.
+          if [[ "$GITHUB_REF_NAME" == "v0.1.6" ]]; then
+            args+=(--ignore GHSA-gcqx-w48m-w2h4)
+          fi
+          pnpm -C web audit "${args[@]}"
 
       - name: Run checks
         run: make ci
