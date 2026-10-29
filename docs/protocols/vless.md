@@ -389,7 +389,7 @@ X25519-MLKEM768」选项开启时，仅对 `security=reality` 的 URI 添加该�
 vless://<uuid>@example.com:443?security=reality&pbk=<password>&fp=chrome&support-x25519mlkem768=true#example
 ```
 
-此选项保存在节点的 URI 扩展参数中，**不会写入 Xray
+此选项保存在节点的 URI 扩展参数中，保存及重新加载 Xray 配置时会独立保留，**不会写入 Xray
 `streamSettings.realitySettings`**；其他客户端可能忽略它。Mihomo 的开关
 只决定是否保留指纹提供的 X25519-MLKEM768 能力，不能保证所选指纹一定提供
 对应的 TLS key share。它不同于 `pqv`（REALITY ML-DSA-65 签名公钥）和

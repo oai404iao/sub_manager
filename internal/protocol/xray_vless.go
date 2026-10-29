@@ -241,7 +241,7 @@ func NodeFromXrayOutbound(outbound map[string]any) (model.Node, error) {
 }
 
 // ApplyXrayOutbound makes the exact Xray outbound object authoritative while
-// preserving database metadata and group membership on node.
+// preserving database metadata, group membership, and URI-only extensions on node.
 func ApplyXrayOutbound(node *model.Node) error {
 	if node == nil || node.Protocol != "vless" || node.XrayOutbound == nil {
 		return nil
@@ -251,6 +251,7 @@ func ApplyXrayOutbound(node *model.Node) error {
 		return err
 	}
 	parsed.ID = node.ID
+	parsed.Extra = node.Extra
 	parsed.GroupIDs = node.GroupIDs
 	parsed.SubscriptionID = node.SubscriptionID
 	parsed.CreatedAt = node.CreatedAt

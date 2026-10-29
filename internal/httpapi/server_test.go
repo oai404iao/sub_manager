@@ -17,9 +17,89 @@ import (
 
 	"github.com/oai404iao/sub_manager/internal/config"
 	"github.com/oai404iao/sub_manager/internal/model"
+	"github.com/oai404iao/sub_manager/internal/protocol"
 	"github.com/oai404iao/sub_manager/internal/store"
 	"github.com/oai404iao/sub_manager/internal/version"
 )
+
+func TestNodeMihomoExtensionUpdate(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	handler := New(config.Config{SigningKey: "test-signing-key"}, database).Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin", "password": "password",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d", login.Code)
+	}
+	cookie := login.Result().Cookies()[0]
+	password := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	node, err := protocol.ParseURI("vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality&fp=chrome&pbk=" + password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := performJSONRequest(t, handler, http.MethodPost, "/api/nodes", node, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", created.Code, created.Body.String())
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &node); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false, true} {
+		node.Extra = map[string]string{"custom-extension": "preserved"}
+		if enabled {
+			node.Extra["support-x25519mlkem768"] = "true"
+		}
+		updated := performJSONRequest(t, handler, http.MethodPut, "/api/nodes/"+strconv.FormatInt(node.ID, 10), node, cookie)
+		if updated.Code != http.StatusOK {
+			t.Fatalf("update status = %d body=%s", updated.Code, updated.Body.String())
+		}
+		var saved model.Node
+		if err := json.Unmarshal(updated.Body.Bytes(), &saved); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := database.Node(context.Background(), node.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stateResponse := performJSONRequest(t, handler, http.MethodGet, "/api/state", nil, cookie)
+		if stateResponse.Code != http.StatusOK {
+			t.Fatalf("state status = %d", stateResponse.Code)
+		}
+		var state struct {
+			Nodes []model.Node `json:"nodes"`
+		}
+		if err := json.Unmarshal(stateResponse.Body.Bytes(), &state); err != nil {
+			t.Fatal(err)
+		}
+		if len(state.Nodes) != 1 {
+			t.Fatalf("nodes = %d", len(state.Nodes))
+		}
+		for _, got := range []model.Node{saved, stored, state.Nodes[0]} {
+			if (got.Extra["support-x25519mlkem768"] == "true") != enabled || got.Extra["custom-extension"] != "preserved" {
+				t.Fatalf("enabled=%v extra=%v", enabled, got.Extra)
+			}
+			uri, err := protocol.URI(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(uri, "support-x25519mlkem768=true") != enabled {
+				t.Fatalf("enabled=%v URI=%s", enabled, uri)
+			}
+			outbound, err := protocol.XrayOutboundJSON(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(outbound), "support-x25519mlkem768") {
+				t.Fatal("Mihomo extension leaked into Xray outbound")
+			}
+		}
+		node = state.Nodes[0]
+	}
+}
 
 func TestPublicOperationalEndpoints(t *testing.T) {
 	handler := New(config.Config{SigningKey: "test-signing-key"}, nil).Handler()
