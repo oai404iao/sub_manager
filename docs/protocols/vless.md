@@ -358,7 +358,7 @@ response version、method、path、status、reason 与多值 headers。
 | userinfo | 映射后的 UUID |
 | `encryption` | VLESS Encryption 完整字符串 |
 | `flow` | Flow |
-| `type` | `tcp`/`xhttp`/`kcp`/`grpc`/`ws`/`httpupgrade`/`hysteria` |
+| `type` | `tcp`/`xhttp`/`kcp`/`grpc`/`ws`/`httpupgrade` |
 | `security` | `none`/`tls`/`reality` |
 | `sni` | TLS/REALITY serverName |
 | `alpn` | TLS ALPN |
@@ -374,8 +374,9 @@ response version、method、path、status、reason 与多值 headers。
 | `mode` | XHTTP mode 或 gRPC multi |
 | `serviceName` / `authority` | gRPC |
 | `mtu` / `tti` | mKCP |
-| `extra` | Base64URL Raw 编码的 XHTTP extra JSON |
-| `fm` | Base64URL Raw 编码的 FinalMask JSON |
+| `extra` | URL 转义的 XHTTP extra JSON 对象（不是 Base64） |
+| `fm` | URL 转义的 FinalMask JSON 对象（不是 Base64） |
+| `udp=false` | 可导入的本系统 UDP 策略；不可互通分享 |
 
 ### Mihomo 专用扩展
 
@@ -397,6 +398,37 @@ vless://<uuid>@example.com:443?security=reality&pbk=<password>&fp=chrome&support
 
 URI 无法天然表达 Xray JSON 的全部字段，所以**完整无损导入/导出应使用 Xray
 JSON**；分享 URI 用于客户端通用订阅兼容。
+
+### 导入与分享边界
+
+- XHTTP 没有 `extra` 时，外层高级配置（如 `xmux`、`headers`）合入 URI 的
+  `extra`；已有 `extra` 时按 Xray 语义完全取代外层高级字段，
+  `host/path/mode` 始终保持外层值。
+- Hysteria **transport** 仍可保存、编辑和导出完整 Xray JSON，但没有本项目采用的
+  标准 URI 映射，拒绝 URI 分享；不输出缺少 version/auth 的链接，也不冒充独立
+  `hysteria2://` 节点。
+- `mux`、`sockopt`、额外 TLS 参数、WS 非 Host headers 等没有等价 URI 表达的
+  配置，分享或批量导出会报节点名与字段路径，不会静默删字段。完整 JSON
+  保存、编辑、下载和其他普通节点的分享不受影响。
+- `udp=false` 在本系统导入、保存和编辑中保留；当前核对的 Mihomo URI 转换器
+  固定启用 VLESS UDP，因此拒绝该节点的 URI 分享，需在消费端原生配置禁用。
+  Xray outbound JSON 本身也没有该应用策略字段，JSON 下载不承诺表达禁用 UDP。
+- Mihomo `proxies` YAML 和 JSON 使用同一导入路径。支持等价的 encryption、
+  TLS ALPN、基础 XHTTP 及部分高级参数、WS headers 和
+  `Sec-WebSocket-Protocol` early-data；不能等价转换的 smux、packet encoding、
+  证书/拨号选项、其他 early-data 模式等会明确拒绝，而不是降级到默认语义。
+  WS 非 Host headers 可存为 JSON，但不可无损转 URI。
+  WS/gRPC 采用 Mihomo 实际生效的 HTTP/1.1/h2 ALPN；RAW TLS 没有显式 ALPN
+  时拒绝转换，避免将无 ALPN 悄悄改为 Xray 默认 h2/http/1.1。未指定 TLS
+  client-fingerprint 时以 Xray `unsafe` 表达 Go TLS（并非跳过证书验证）。
+- URI 列表、Mihomo proxies、Xray outbounds 中混入未支持协议或非法条目时整批
+  失败，订阅刷新不会以一个不完整子集替换已有节点。完整 Xray 根配置仍只导入
+  outbound，不导入路由/DNS/inbound。
+- 未知或重复的 VLESS URI 参数明确拒绝；旧版 Base64 extra/fm 不再接受，需从
+  完整 JSON 或规范 URL 转义 JSON 重新导入。
+
+互通核对限分享提案及源码快照：Xray `a52db8f6`、Mihomo Alpha `69c16319`。
+不代表所有客户端支持提案全部参数，也不是代理握手连通性承诺。
 
 ## 项目实现覆盖
 

@@ -620,7 +620,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := protocol.Subscription(nodes); err != nil {
-		serverError(w, err)
+		writeError(w, http.StatusBadRequest, "无法分享: "+err.Error())
 		return
 	}
 
@@ -761,7 +761,7 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		serverError(w, err)
+		writeError(w, http.StatusBadRequest, "无法分享: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
