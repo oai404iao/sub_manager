@@ -4,7 +4,7 @@ FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:d32cdf619f63fe0471182d08996
 
 WORKDIR /src
 RUN npm install --global pnpm@12.4.1
-COPY web/package.json web/pnpm-lock.yaml ./web/
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./web/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm -C web install --frozen-lockfile
 COPY web ./web
 RUN pnpm -C web run build
