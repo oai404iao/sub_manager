@@ -26,10 +26,22 @@
 ```text
 socks5://user:password@host:1080#name
 socks://user:password@host:1080#name
+socks5h://user:password@host:1080#name
 ```
 
-用户名和密码使用 URL percent-encoding。没有认证时省略 `userinfo@`。额外能力使用
-查询参数表达，例如 `?udp=true&tls=true&sni=example.com&allowInsecure=false`。
+用户名和密码使用 URL percent-encoding；也接受 Base64 `username:password`
+userinfo（标准/URL-safe、有无 padding）。显式 `user:password` 优先按明文解析，
+解码后只按第一个冒号拆分。没有认证时省略 `userinfo@`。
+
+`socks5h` 作为 SOCKS5 别名导入，本系统不运行代理或执行 DNS。
+历史项目 query（`udp/tls/sni/allowInsecure`）仍可导入、保存和编辑，但它们
+不是通用 SOCKS 分享规范。Mihomo Alpha `69c16319` 的 SOCKS URI 分支不读取
+这些 query，不能用项目自我往返证明互通。
+
+因此，仅基础无 TLS、无 UDP 和无扩展语义的节点可输出 SOCKS URI。设置了
+TLS、SNI、跳过证书验证、UDP 或扩展字段时，分享/批量导出明确报错；请使用
+原生客户端配置。系统不新增 SOCKS 原生配置导出，也不输出看似可用但丢失 TLS
+的链接。普通用户名/密码节点的分享继续可用。
 
 ## 协议注意点
 

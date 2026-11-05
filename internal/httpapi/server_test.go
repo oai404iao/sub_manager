@@ -82,6 +82,13 @@ func TestNodeMihomoExtensionUpdate(t *testing.T) {
 			if (got.Extra["support-x25519mlkem768"] == "true") != enabled || got.Extra["custom-extension"] != "preserved" {
 				t.Fatalf("enabled=%v extra=%v", enabled, got.Extra)
 			}
+			if _, err := protocol.URI(got); err == nil {
+				t.Fatal("unknown extension must not be advertised as interoperable")
+			}
+			got.Extra = map[string]string{}
+			if enabled {
+				got.Extra["support-x25519mlkem768"] = "true"
+			}
 			uri, err := protocol.URI(got)
 			if err != nil {
 				t.Fatal(err)
@@ -98,6 +105,61 @@ func TestNodeMihomoExtensionUpdate(t *testing.T) {
 			}
 		}
 		node = state.Nodes[0]
+	}
+}
+
+func TestUnshareableNodeRemainsEditable(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	server := New(config.Config{SigningKey: "test-signing-key"}, database)
+	handler := server.Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password"}, nil)
+	cookie := login.Result().Cookies()[0]
+	nodes, err := protocol.ParseText(`{"protocol":"vless","settings":{"address":"example.com","port":443,"id":"test-id","encryption":"none"},"streamSettings":{"security":"tls"},"mux":{"enabled":true,"concurrency":8}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := performJSONRequest(t, handler, http.MethodPost, "/api/nodes", nodes[0], cookie)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("save: %d %s", response.Code, response.Body.String())
+	}
+	var saved model.Node
+	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(saved.ID, 10)
+	saved.Name = "updated"
+	response = performJSONRequest(t, handler, http.MethodPut, "/api/nodes/"+id, saved, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", response.Code, response.Body.String())
+	}
+	response = performJSONRequest(t, handler, http.MethodGet, "/api/nodes/"+id+"/xray", nil, cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mux"`) {
+		t.Fatalf("JSON: %d %s", response.Code, response.Body.String())
+	}
+	for _, request := range []struct {
+		path string
+		body any
+	}{
+		{"/api/shares", map[string]any{"kind": "node", "id": saved.ID}},
+		{"/api/nodes/export", map[string]any{"ids": []int64{saved.ID}, "format": "uri"}},
+	} {
+		response = performJSONRequest(t, handler, http.MethodPost, request.path, request.body, cookie)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "mux") {
+			t.Fatalf("projection: %d %s", response.Code, response.Body.String())
+		}
+	}
+	// An existing signed URL must also surface a useful conversion error.
+	response = performJSONRequest(t, handler, http.MethodGet, server.signedURL("node", saved.ID, "subscription", 0), nil, nil)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "mux") {
+		t.Fatalf("public: %d %s", response.Code, response.Body.String())
+	}
+	response = performJSONRequest(t, handler, http.MethodGet, "/api/state", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
 	}
 }
 
@@ -331,6 +393,17 @@ func TestSubscriptionCRUDAPI(t *testing.T) {
 	}
 	if len(nodes) != 1 {
 		t.Fatalf("refresh should replace subscription nodes, got %d", len(nodes))
+	}
+	oldID := nodes[0].ID
+	server.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("socks5://example.com:1080\ntrojan://test@example.com:443"))}, nil
+	})}
+	if _, err := server.syncSubscription(context.Background(), subscription); err == nil {
+		t.Fatal("mixed subscription must fail")
+	}
+	nodes, err = database.Nodes(context.Background(), 0)
+	if err != nil || len(nodes) != 1 || nodes[0].ID != oldID {
+		t.Fatalf("failed refresh replaced existing nodes: %+v %v", nodes, err)
 	}
 
 	deleted := performJSONRequest(

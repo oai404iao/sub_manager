@@ -105,6 +105,9 @@ func ParseXrayJSON(input string) ([]model.Node, bool, error) {
 	if err := json.Unmarshal([]byte(trimmed), &document); err != nil {
 		return nil, false, nil
 	}
+	if !looksLikeXrayDocument(document) {
+		return nil, false, nil
+	}
 
 	var outbounds []map[string]any
 	switch value := document.(type) {
@@ -113,6 +116,8 @@ func ParseXrayJSON(input string) ([]model.Node, bool, error) {
 			for _, item := range items {
 				if outbound, ok := item.(map[string]any); ok {
 					outbounds = append(outbounds, outbound)
+				} else {
+					return nil, true, errors.New("Xray outbounds 必须全部为对象")
 				}
 			}
 		} else if _, ok := value["protocol"]; ok {
@@ -124,6 +129,8 @@ func ParseXrayJSON(input string) ([]model.Node, bool, error) {
 		for _, item := range value {
 			if outbound, ok := item.(map[string]any); ok {
 				outbounds = append(outbounds, outbound)
+			} else {
+				return nil, true, errors.New("Xray outbounds 必须全部为对象")
 			}
 		}
 	default:
@@ -133,7 +140,7 @@ func ParseXrayJSON(input string) ([]model.Node, bool, error) {
 	nodes := make([]model.Node, 0, len(outbounds))
 	for index, outbound := range outbounds {
 		if !strings.EqualFold(stringFromMap(outbound, "protocol"), "vless") {
-			continue
+			return nil, true, fmt.Errorf("Xray outbound %d: 不支持协议 %q", index+1, stringFromMap(outbound, "protocol"))
 		}
 		node, err := NodeFromXrayOutbound(outbound)
 		if err != nil {
@@ -251,6 +258,8 @@ func ApplyXrayOutbound(node *model.Node) error {
 		return err
 	}
 	parsed.ID = node.ID
+	// UDP is an application policy, absent from an Xray VLESS outbound.
+	parsed.UDP = node.UDP
 	parsed.Extra = node.Extra
 	parsed.GroupIDs = node.GroupIDs
 	parsed.SubscriptionID = node.SubscriptionID

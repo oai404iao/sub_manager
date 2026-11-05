@@ -2152,6 +2152,23 @@ function NodeDialog({
 
             <Separator />
 
+            <Field orientation="horizontal">
+              <Checkbox
+                id="node-udp"
+                checked={draft.udp}
+                onCheckedChange={(checked) => update("udp", checked)}
+                aria-describedby="node-udp-description"
+              />
+              <FieldContent>
+                <FieldLabel htmlFor="node-udp">启用 UDP</FieldLabel>
+                <FieldDescription id="node-udp-description">
+                  {draft.protocol === "vless"
+                    ? "禁用策略会保存，但通用 URI 无法保证客户端采用，禁用时不能分享。Xray JSON 也不包含此策略。"
+                    : "SOCKS URI 无法保证客户端采用 UDP 设置，启用时不能分享；关闭会改变节点策略，请确认后保存。"}
+                </FieldDescription>
+              </FieldContent>
+            </Field>
+
             {draft.protocol === "vless" ? (
               <Tabs
                 value={editorMode}

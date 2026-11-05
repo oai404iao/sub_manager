@@ -37,7 +37,7 @@ func ParseText(input string) ([]model.Node, error) {
 			return nodes, err
 		}
 		nodes, errorsForContent := parseURIContent(content)
-		if len(nodes) > 0 {
+		if len(nodes) > 0 && len(errorsForContent) == 0 {
 			return nodes, nil
 		}
 		for _, message := range errorsForContent {
@@ -97,7 +97,7 @@ func ParseURI(raw string) (model.Node, error) {
 	switch strings.ToLower(parsed.Scheme) {
 	case "vless":
 		return parseVLESS(parsed)
-	case "socks", "socks5":
+	case "socks", "socks5", "socks5h":
 		return parseSOCKS(parsed)
 	default:
 		return model.Node{}, fmt.Errorf("unsupported scheme %q", parsed.Scheme)
@@ -120,7 +120,7 @@ func Subscription(nodes []model.Node) (string, error) {
 	for _, node := range nodes {
 		line, err := URI(node)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("节点 %q: %w", node.Name, err)
 		}
 		lines = append(lines, line)
 	}
@@ -132,7 +132,7 @@ func FullContent(nodes []model.Node) (string, error) {
 	for _, node := range nodes {
 		line, err := URI(node)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("节点 %q: %w", node.Name, err)
 		}
 		lines = append(lines, line)
 	}
@@ -151,7 +151,10 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 	if id == "" || parsed.Hostname() == "" {
 		return model.Node{}, errors.New("VLESS UUID and server are required")
 	}
-	query := parsed.Query()
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return model.Node{}, errors.New("invalid VLESS query encoding")
+	}
 	known := map[string]bool{
 		"encryption": true, "flow": true, "type": true, "security": true,
 		"sni": true, "alpn": true, "fp": true, "allowInsecure": true,
@@ -159,10 +162,34 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 		"serviceName": true, "authority": true, "headerType": true, "udp": true,
 		"mode": true, "mtu": true, "tti": true, "extra": true, "fm": true,
 		"ech": true, "pcs": true, "vcn": true, "pqv": true,
+		"support-x25519mlkem768": true,
+	}
+	for key, values := range query {
+		if !known[key] || len(values) != 1 {
+			return model.Node{}, fmt.Errorf("不支持或重复的 VLESS URI 参数 %q", key)
+		}
+	}
+	for _, key := range []string{"udp", "allowInsecure"} {
+		if query.Has(key) {
+			if _, err := strconv.ParseBool(query.Get(key)); err != nil {
+				return model.Node{}, fmt.Errorf("invalid %s boolean", key)
+			}
+		}
 	}
 	network, networkErr := canonicalTransport(valueOr(query.Get("type"), "tcp"))
 	if networkErr != nil {
 		return model.Node{}, networkErr
+	}
+	if query.Has("extra") && network != "xhttp" {
+		return model.Node{}, errors.New("extra requires XHTTP")
+	}
+	if query.Has("mode") {
+		if network != "grpc" && network != "xhttp" {
+			return model.Node{}, errors.New("mode requires gRPC or XHTTP")
+		}
+		if network == "grpc" && query.Get("mode") != "multi" && query.Get("mode") != "gun" && query.Get("mode") != "" {
+			return model.Node{}, errors.New("unsupported gRPC mode")
+		}
 	}
 	node := model.Node{
 		Name:          defaultName(parsed.Fragment, parsed.Hostname()),
@@ -187,7 +214,7 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 		Authority:     query.Get("authority"),
 		HeaderType:    query.Get("headerType"),
 		UDP:           query.Get("udp") == "" || parseBool(query.Get("udp")),
-		Extra:         extras(query, known),
+		Extra:         map[string]string{},
 	}
 	if value, present := query["support-x25519mlkem768"]; present {
 		if node.Security != "reality" {
@@ -212,7 +239,7 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 		settings := ensureChildMap(stream, "xhttpSettings")
 		setOrDelete(settings, "mode", query.Get("mode"))
 		if encoded := query.Get("extra"); encoded != "" {
-			value, err := decodeBase64JSON(encoded)
+			value, err := decodeShareJSON(encoded)
 			if err != nil {
 				return model.Node{}, fmt.Errorf("invalid XHTTP extra: %w", err)
 			}
@@ -254,7 +281,7 @@ func parseVLESS(parsed *url.URL) (model.Node, error) {
 		setOrDelete(settings, "mldsa65Verify", query.Get("pqv"))
 	}
 	if encoded := query.Get("fm"); encoded != "" {
-		value, err := decodeBase64JSON(encoded)
+		value, err := decodeShareJSON(encoded)
 		if err != nil {
 			return model.Node{}, fmt.Errorf("invalid FinalMask: %w", err)
 		}
@@ -270,11 +297,34 @@ func parseSOCKS(parsed *url.URL) (model.Node, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return model.Node{}, errors.New("SOCKS5 port is invalid")
 	}
-	query := parsed.Query()
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return model.Node{}, errors.New("invalid SOCKS query encoding")
+	}
+	for _, key := range []string{"udp", "tls", "allowInsecure"} {
+		if values, exists := query[key]; exists {
+			if len(values) != 1 {
+				return model.Node{}, fmt.Errorf("duplicate SOCKS %s", key)
+			}
+			if _, err := strconv.ParseBool(values[0]); err != nil {
+				return model.Node{}, fmt.Errorf("invalid %s boolean", key)
+			}
+		}
+	}
 	username, password := "", ""
 	if parsed.User != nil {
 		username = parsed.User.Username()
-		password, _ = parsed.User.Password()
+		var hasPassword bool
+		password, hasPassword = parsed.User.Password()
+		if !hasPassword {
+			for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+				decoded, err := encoding.DecodeString(username)
+				if err == nil && utf8.Valid(decoded) && strings.Contains(string(decoded), ":") {
+					username, password, _ = strings.Cut(string(decoded), ":")
+					break
+				}
+			}
+		}
 	}
 	known := map[string]bool{
 		"udp": true, "tls": true, "sni": true, "allowInsecure": true,
@@ -296,8 +346,14 @@ func parseSOCKS(parsed *url.URL) (model.Node, error) {
 }
 
 func vlessURI(node model.Node) (string, error) {
+	if !node.UDP {
+		return "", errors.New("VLESS URI 不能跨客户端保证 udp=false；请在消费端原生配置禁用 UDP")
+	}
 	outbound, err := buildXrayOutbound(node)
 	if err != nil {
+		return "", err
+	}
+	if err := validateURIOutbound(outbound); err != nil {
 		return "", err
 	}
 	stream, _ := mapFromMap(outbound, "streamSettings")
@@ -323,8 +379,22 @@ func vlessURI(node model.Node) (string, error) {
 		set(query, "host", stringFromMap(settings, "host"))
 		set(query, "path", stringFromMap(settings, "path"))
 		set(query, "mode", stringFromMap(settings, "mode"))
-		if extra, ok := settings["extra"]; ok && extra != nil {
-			encoded, err := encodeBase64JSON(extra)
+		extra := cloneMap(settings)
+		delete(extra, "host")
+		delete(extra, "path")
+		delete(extra, "mode")
+		delete(extra, "extra")
+		if value, present := settings["extra"]; present {
+			if _, ok := value.(map[string]any); !ok {
+				return "", errors.New("XHTTP extra 必须为 JSON 对象")
+			}
+		}
+		if nested, ok := mapFromMap(settings, "extra"); ok {
+			// Xray replaces all advanced options when extra is present.
+			extra = cloneMap(nested)
+		}
+		if len(extra) > 0 {
+			encoded, err := encodeShareJSON(extra)
 			if err != nil {
 				return "", err
 			}
@@ -379,19 +449,17 @@ func vlessURI(node model.Node) (string, error) {
 		}
 	}
 	if finalmask, ok := stream["finalmask"]; ok && finalmask != nil {
-		encoded, err := encodeBase64JSON(finalmask)
+		encoded, err := encodeShareJSON(finalmask)
 		if err != nil {
 			return "", err
 		}
 		set(query, "fm", encoded)
 	}
-	for key, value := range node.Extra {
+	for key := range node.Extra {
 		if key == "support-x25519mlkem768" {
 			continue
 		}
-		if !query.Has(key) {
-			query.Set(key, value)
-		}
+		return "", fmt.Errorf("URI 无法解释扩展参数 %q；请使用完整配置", key)
 	}
 	uriID, err := VLESSUUID(node.UUID)
 	if err != nil {
@@ -410,21 +478,8 @@ func socksURI(node model.Node) (string, error) {
 	if err := Validate(node); err != nil {
 		return "", err
 	}
-	query := url.Values{}
-	if node.UDP {
-		query.Set("udp", "true")
-	}
-	if node.TLS {
-		query.Set("tls", "true")
-	}
-	set(query, "sni", node.SNI)
-	if node.AllowInsecure {
-		query.Set("allowInsecure", "true")
-	}
-	for key, value := range node.Extra {
-		if !query.Has(key) {
-			query.Set(key, value)
-		}
+	if node.TLS || node.SNI != "" || node.AllowInsecure || node.UDP || len(node.Extra) > 0 {
+		return "", errors.New("SOCKS URI 无法互通表达 TLS、SNI、证书验证、UDP 或扩展选项；请使用原生客户端配置")
 	}
 	var user *url.Userinfo
 	if node.Username != "" {
@@ -434,7 +489,6 @@ func socksURI(node model.Node) (string, error) {
 		Scheme:   "socks5",
 		User:     user,
 		Host:     net.JoinHostPort(node.Server, strconv.Itoa(node.Port)),
-		RawQuery: query.Encode(),
 		Fragment: node.Name,
 	}).String(), nil
 }
@@ -472,10 +526,51 @@ func parseYAML(input string) ([]model.Node, bool, error) {
 	default:
 		return nil, false, nil
 	}
+	var lists [][]any
+	if values, ok := document.([]any); ok {
+		lists = append(lists, values)
+	}
+	if root, ok := document.(map[string]any); ok {
+		containers := 0
+		for _, key := range []string{"proxies", "nodes", "uris", "links"} {
+			if _, present := root[key]; present {
+				containers++
+			}
+			if values, ok := root[key].([]any); ok {
+				lists = append(lists, values)
+			}
+			if values, ok := root[key].(map[string]any); ok {
+				for _, value := range values {
+					if _, ok := value.(string); !ok {
+						return nil, true, errors.New("URI 字典包含非字符串条目")
+					}
+				}
+			}
+		}
+		if containers > 1 {
+			return nil, true, errors.New("导入只能包含一个节点列表容器")
+		}
+	}
+	for _, values := range lists {
+		stringsSeen, objectsSeen := false, false
+		for _, value := range values {
+			switch value.(type) {
+			case string:
+				stringsSeen = true
+			case map[string]any:
+				objectsSeen = true
+			default:
+				return nil, true, errors.New("导入列表包含非法条目，必须全部为 URI 或全部为节点对象")
+			}
+		}
+		if stringsSeen && objectsSeen {
+			return nil, true, errors.New("导入列表不能混合 URI 与节点对象")
+		}
+	}
 
 	if content, recognized := yamlURIContent(document); recognized {
 		nodes, parseErrors := parseURIContent(content)
-		if len(nodes) > 0 {
+		if len(nodes) > 0 && len(parseErrors) == 0 {
 			return nodes, true, nil
 		}
 		if len(parseErrors) > 0 {
@@ -498,94 +593,6 @@ func parseYAML(input string) ([]model.Node, bool, error) {
 		return parseMihomoProxies(proxies)
 	}
 	return nil, false, nil
-}
-
-func parseMihomoProxies(proxies []map[string]any) ([]model.Node, bool, error) {
-	nodes := make([]model.Node, 0, len(proxies))
-	var validationErrors []string
-	for _, proxy := range proxies {
-		kind := lowerString(proxy["type"])
-		switch kind {
-		case "vless":
-			node := model.Node{
-				Name:          stringValue(proxy["name"]),
-				Protocol:      "vless",
-				Server:        stringValue(proxy["server"]),
-				Port:          intValue(proxy["port"]),
-				UUID:          stringValue(proxy["uuid"]),
-				Flow:          stringValue(proxy["flow"]),
-				Encryption:    "none",
-				Network:       valueOr(stringValue(proxy["network"]), "raw"),
-				Security:      "none",
-				SNI:           stringValue(proxy["servername"]),
-				Fingerprint:   stringValue(proxy["client-fingerprint"]),
-				AllowInsecure: boolValue(proxy["skip-cert-verify"]),
-				UDP:           boolDefault(proxy["udp"], true),
-				Extra:         map[string]string{},
-			}
-			if boolValue(proxy["tls"]) {
-				node.Security = "tls"
-			}
-			if reality, ok := proxy["reality-opts"].(map[string]any); ok {
-				node.Security = "reality"
-				node.PublicKey = stringValue(reality["public-key"])
-				node.ShortID = stringValue(reality["short-id"])
-				if boolValue(reality["support-x25519mlkem768"]) {
-					node.Extra["support-x25519mlkem768"] = "true"
-				}
-			}
-			if options, ok := proxy["ws-opts"].(map[string]any); ok {
-				node.Path = stringValue(options["path"])
-				if headers, ok := options["headers"].(map[string]any); ok {
-					node.Host = stringValue(headers["Host"])
-					if node.Host == "" {
-						node.Host = stringValue(headers["host"])
-					}
-				}
-			}
-			if options, ok := proxy["grpc-opts"].(map[string]any); ok {
-				node.ServiceName = stringValue(options["grpc-service-name"])
-			}
-			if canonical, err := canonicalTransport(node.Network); err == nil {
-				node.Network = canonical
-			}
-			if err := EnsureXrayOutbound(&node); err != nil {
-				validationErrors = append(validationErrors, node.Name+": "+err.Error())
-				continue
-			}
-			if err := Validate(node); err != nil {
-				validationErrors = append(validationErrors, node.Name+": "+err.Error())
-				continue
-			}
-			nodes = append(nodes, node)
-		case "socks5", "socks":
-			node := model.Node{
-				Name:          stringValue(proxy["name"]),
-				Protocol:      "socks5",
-				Server:        stringValue(proxy["server"]),
-				Port:          intValue(proxy["port"]),
-				Username:      stringValue(proxy["username"]),
-				Password:      stringValue(proxy["password"]),
-				UDP:           boolValue(proxy["udp"]),
-				TLS:           boolValue(proxy["tls"]),
-				SNI:           stringValue(proxy["servername"]),
-				AllowInsecure: boolValue(proxy["skip-cert-verify"]),
-				Extra:         map[string]string{},
-			}
-			if err := Validate(node); err != nil {
-				validationErrors = append(validationErrors, node.Name+": "+err.Error())
-				continue
-			}
-			nodes = append(nodes, node)
-		}
-	}
-	if len(validationErrors) > 0 {
-		return nil, true, fmt.Errorf("invalid Mihomo nodes: %s", strings.Join(validationErrors, "; "))
-	}
-	if len(nodes) == 0 {
-		return nil, true, errors.New("Mihomo YAML does not contain supported VLESS or SOCKS5 proxies")
-	}
-	return nodes, true, nil
 }
 
 func normalizeYAML(value any) any {
@@ -841,40 +848,6 @@ func stringValue(value any) string {
 	}
 }
 
-func intValue(value any) int {
-	switch value := value.(type) {
-	case int:
-		return value
-	case int64:
-		return int(value)
-	case float64:
-		return int(value)
-	case string:
-		result, _ := strconv.Atoi(value)
-		return result
-	default:
-		return 0
-	}
-}
-
-func boolValue(value any) bool {
-	switch value := value.(type) {
-	case bool:
-		return value
-	case string:
-		return parseBool(value)
-	default:
-		return false
-	}
-}
-
-func boolDefault(value any, fallback bool) bool {
-	if value == nil {
-		return fallback
-	}
-	return boolValue(value)
-}
-
 func JSON(node model.Node) string {
 	value, _ := json.Marshal(node)
 	return string(value)
@@ -893,30 +866,21 @@ func uriTransport(method string) string {
 	}
 }
 
-func encodeBase64JSON(value any) (string, error) {
+func encodeShareJSON(value any) (string, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
+	return string(data), nil
 }
 
-func decodeBase64JSON(value string) (any, error) {
-	var data []byte
-	var err error
-	for _, encoding := range []*base64.Encoding{
-		base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.StdEncoding,
-	} {
-		if data, err = encoding.DecodeString(value); err == nil {
-			break
-		}
-	}
-	if err != nil {
+func decodeShareJSON(value string) (any, error) {
+	var result map[string]any
+	if err := json.Unmarshal([]byte(value), &result); err != nil {
 		return nil, err
 	}
-	var result any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
+	if result == nil {
+		return nil, errors.New("must be a JSON object")
 	}
 	return result, nil
 }

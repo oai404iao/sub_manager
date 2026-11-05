@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,8 +79,8 @@ func TestVLESSMihomoMLKEMShareLink(t *testing.T) {
 }
 
 func TestVLESSXHTTPLinkFields(t *testing.T) {
-	extra := base64.RawURLEncoding.EncodeToString([]byte(`{"xPaddingBytes":"100-1000"}`))
-	finalmask := base64.RawURLEncoding.EncodeToString([]byte(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello"}}]}`))
+	extra := url.QueryEscape(`{"xPaddingBytes":"100-1000"}`)
+	finalmask := url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello"}}]}`)
 	raw := "vless://11111111-1111-1111-1111-111111111111@example.com:443?encryption=none&security=tls&sni=example.com&fp=chrome&type=xhttp&host=cdn.example.com&path=%2Fapi&mode=stream-up&extra=" +
 		extra + "&fm=" + finalmask + "#xhttp"
 	node, err := ParseURI(raw)
@@ -215,6 +216,7 @@ func TestMihomoYAMLSequence(t *testing.T) {
   uuid: 11111111-1111-1111-1111-111111111111
   tls: true
   servername: example.com
+  alpn: [h2, http/1.1]
 `
 	nodes, err := ParseText(input)
 	if err != nil {
