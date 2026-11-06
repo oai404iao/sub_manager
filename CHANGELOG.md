@@ -4,6 +4,13 @@
 
 ## 未发布
 
+## 0.1.7 - 2026-11-06
+
+- 修复 VLESS URI、Mihomo YAML 与 SOCKS 导入和分享的语义保留问题，避免生成丢失代理配置的链接。
+- 兼容性变化：混入不支持协议或非法条目的订阅整批拒绝；无法无损映射的节点拒绝 URI 分享，仍可使用完整 Xray JSON 管理。SOCKS TLS/UDP 等扩展配置不再输出基础 SOCKS URI。
+- 迁移提示：VLESS URI 的 `extra` / `fm` 改用 URL 转义 JSON，不再接受旧版 Base64 表达；请从原始配置重新导出。
+- 移除未使用的 shadcn CLI 依赖链并锁定已修复的 minimatch，消除此前 deepmerge 等依赖审计问题。
+
 ## 0.1.6 - 2026-10-29
 
 - 修复 REALITY 节点的 `support-x25519mlkem768` 选项保存或重新加载后丢失的问题，保留独立于 Xray JSON 的 URI 扩展参数。
