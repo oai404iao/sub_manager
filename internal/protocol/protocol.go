@@ -49,7 +49,7 @@ func ParseText(input string) ([]model.Node, error) {
 	if len(parseErrors) > 0 {
 		return nil, fmt.Errorf("no supported nodes found: %s", strings.Join(parseErrors, "; "))
 	}
-	return nil, errors.New("no supported VLESS or SOCKS5 nodes found")
+	return nil, errors.New("未找到支持的 VLESS、SOCKS5、Hysteria 2 或 Mieru 节点")
 }
 
 func parseURIContent(content string) ([]model.Node, []string) {
@@ -90,15 +90,25 @@ func normalizeImportLine(line string) string {
 }
 
 func ParseURI(raw string) (model.Node, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
+	raw = strings.TrimSpace(raw)
+	scheme, _, _ := strings.Cut(raw, "://")
+	switch strings.ToLower(scheme) {
+	case "hysteria2", "hy2":
+		return parseHysteria2URI(raw)
+	case "mieru":
+		return model.Node{}, errors.New("mieru:// 是完整客户端配置；请用 mieru export config simple 生成 mierus:// 节点链接")
+	}
+	parsed, err := url.Parse(raw)
 	if err != nil {
-		return model.Node{}, err
+		return model.Node{}, errors.New("节点 URI 格式无效")
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "vless":
 		return parseVLESS(parsed)
 	case "socks", "socks5", "socks5h":
 		return parseSOCKS(parsed)
+	case "mierus":
+		return parseMieruURI(parsed)
 	default:
 		return model.Node{}, fmt.Errorf("unsupported scheme %q", parsed.Scheme)
 	}
@@ -110,6 +120,10 @@ func URI(node model.Node) (string, error) {
 		return vlessURI(node)
 	case "socks5":
 		return socksURI(node)
+	case "hysteria2":
+		return hysteria2URI(node)
+	case "mieru":
+		return mieruURI(node)
 	default:
 		return "", fmt.Errorf("unsupported protocol %q", node.Protocol)
 	}
@@ -469,7 +483,7 @@ func vlessURI(node model.Node) (string, error) {
 		Scheme:   "vless",
 		User:     url.User(uriID),
 		Host:     net.JoinHostPort(node.Server, strconv.Itoa(node.Port)),
-		RawQuery: query.Encode(),
+		RawQuery: strings.ReplaceAll(query.Encode(), "+", "%20"),
 		Fragment: node.Name,
 	}).String(), nil
 }
@@ -509,8 +523,12 @@ func Validate(node model.Node) error {
 			return err
 		}
 	case "socks5":
+	case "hysteria2":
+		return validateHysteria2(node)
+	case "mieru":
+		return validateMieru(node)
 	default:
-		return errors.New("protocol must be vless or socks5")
+		return errors.New("协议必须为 VLESS、SOCKS5、Hysteria 2 或 Mieru")
 	}
 	return nil
 }
@@ -756,7 +774,11 @@ func looksLikeImportContent(content string) bool {
 	lower := strings.ToLower(trimmed)
 	if strings.Contains(lower, "vless://") ||
 		strings.Contains(lower, "socks://") ||
-		strings.Contains(lower, "socks5://") {
+		strings.Contains(lower, "socks5://") ||
+		strings.Contains(lower, "hysteria2://") ||
+		strings.Contains(lower, "hy2://") ||
+		strings.Contains(lower, "mierus://") ||
+		strings.Contains(lower, "mieru://") {
 		return true
 	}
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "-") {

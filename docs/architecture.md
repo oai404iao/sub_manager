@@ -64,12 +64,12 @@
 - `DELETE /api/nodes`：在事务中批量删除所选节点。
 - `PATCH /api/nodes/groups`：批量添加、移出或替换手工节点的直接分组；所选节点
   包含订阅托管节点时，只接受一个目标分组，并原子迁移相关订阅及其全部节点。
-- `POST /api/nodes/export`：按请求顺序导出多行 URI 或标准 Base64 订阅内容。
+- `POST /api/nodes/export`：按请求顺序导出节点，`format` 可为 `uri`、`base64` 或 `mihomo`。
 - `/api/nodes/import`：解析 Xray/Mihomo YAML、JSON、URI 和 Base64 内容。
 - `/api/nodes/{id}/xray`：导出完整 Xray VLESS OutboundObject。
-- `/api/shares`：生成并记录单一签名订阅 URL；支持限时与永久分享。分组仅返回
-  URL 二维码，单节点额外返回节点 URI 二维码。分组分享通过递归查询聚合并去重
-  当前分组及全部下级分组的节点。
+- `POST /api/shares`：生成并记录签名订阅 URL；可选 `format: base64`（默认）
+  或 `mihomo`。分组仅返回 URL 二维码；单节点在 URI 可表达时额外返回节点 URI
+  二维码。分组分享通过递归查询聚合并去重当前分组及全部下级分组的节点。
 - `POST /api/shares/{id}/revoke`、`DELETE /api/shares/{id}`：撤销分享或删除历史；
   两种操作都会使对应 URL 立即失效。旧版已记录 URL 仍可通过查询参数匹配撤销，
   未记录的旧版签名 URL 保持兼容。

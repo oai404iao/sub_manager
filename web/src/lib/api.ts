@@ -12,10 +12,30 @@ export type Group = {
   created_at: string
 }
 
+export type Hysteria2Options = {
+  ports?: string
+  obfs?: "salamander" | "gecko"
+  obfs_password?: string
+}
+
+export type MieruBinding = {
+  port: string
+  transport: "TCP" | "UDP"
+}
+
+export type MieruOptions = {
+  profile: string
+  bindings: MieruBinding[]
+  mtu?: number
+  multiplexing?: string
+  handshake_mode?: string
+  traffic_pattern?: string
+}
+
 export type Node = {
   id: number
   name: string
-  protocol: "vless" | "socks5"
+  protocol: "vless" | "socks5" | "hysteria2" | "mieru"
   server: string
   port: number
   uuid?: string
@@ -49,6 +69,8 @@ export type Node = {
   final_mask?: Record<string, unknown>
   udp: boolean
   tls: boolean
+  hysteria2?: Hysteria2Options
+  mieru?: MieruOptions
   extra?: Record<string, string>
   xray_outbound?: Record<string, unknown>
   group_ids: number[]
@@ -57,7 +79,7 @@ export type Node = {
   updated_at: string
 }
 
-export type NodeExportFormat = "uri" | "base64"
+export type NodeExportFormat = "uri" | "base64" | "mihomo"
 
 export type NodeExportResult = {
   content: string
@@ -80,9 +102,12 @@ export type Subscription = {
   created_at: string
 }
 
+export type ShareSubscriptionFormat = Exclude<NodeExportFormat, "uri">
+
 export type Share = {
   id: number
   kind: "node" | "group"
+  format: ShareSubscriptionFormat | "uri"
   target_id: number
   target_name: string
   url: string
@@ -115,7 +140,7 @@ export class APIError extends Error {
 
 export async function api<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit = {}
 ): Promise<T> {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -129,7 +154,10 @@ export async function api<T>(
     const body = (await response.json().catch(() => null)) as {
       error?: string
     } | null
-    throw new APIError(response.status, body?.error ?? `HTTP ${response.status}`)
+    throw new APIError(
+      response.status,
+      body?.error ?? `HTTP ${response.status}`
+    )
   }
   if (response.status === 204) {
     return undefined as T

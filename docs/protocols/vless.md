@@ -248,8 +248,9 @@ response version、method、path、status、reason 与多值 headers。
 - `extra`
 
 `extra` 会被 Xray 反序列化为另一份 XHTTP 配置，外层 `host/path/mode` 覆盖
-其中对应值。系统完整保留这些字段；常用字段使用表单，其余通过完整 Xray JSON
-编辑器管理。
+其中对应值。节点表单的「XHTTP Extra / XMUX」回显当前生效的高级配置，
+也可直接填写 JSON 对象，例如 `{"xmux":{"maxConnections":"2-4"}}`。
+修改 XMUX 时可保留同一对象里的其他字段；完整出站仍可通过 Xray JSON 编辑器管理。
 
 ### mKCP
 
@@ -351,7 +352,8 @@ response version、method、path、status、reason 与多值 headers。
 
 ## 分享 URI
 
-系统按 Xray 分享链接讨论 #716 实现当前相关参数：
+系统按 [Xray 分享链接提案 #716](https://github.com/XTLS/Xray-core/discussions/716)
+实现当前相关参数：
 
 | 参数 | 映射 |
 |---|---|
@@ -374,7 +376,7 @@ response version、method、path、status、reason 与多值 headers。
 | `mode` | XHTTP mode 或 gRPC multi |
 | `serviceName` / `authority` | gRPC |
 | `mtu` / `tti` | mKCP |
-| `extra` | URL 转义的 XHTTP extra JSON 对象（不是 Base64） |
+| `extra` | 百分号编码的 XHTTP JSON 对象（含 `xmux`，没有独立 `xmux` 参数；不是 Base64） |
 | `fm` | URL 转义的 FinalMask JSON 对象（不是 Base64） |
 | `udp=false` | 可导入的本系统 UDP 策略；不可互通分享 |
 
@@ -413,14 +415,19 @@ JSON**；分享 URI 用于客户端通用订阅兼容。
 - `udp=false` 在本系统导入、保存和编辑中保留；当前核对的 Mihomo URI 转换器
   固定启用 VLESS UDP，因此拒绝该节点的 URI 分享，需在消费端原生配置禁用。
   Xray outbound JSON 本身也没有该应用策略字段，JSON 下载不承诺表达禁用 UDP。
+  [Mihomo YAML 分享和导出](mihomo-yaml.md)可以直接保留此策略。
 - Mihomo `proxies` YAML 和 JSON 使用同一导入路径。支持等价的 encryption、
-  TLS ALPN、基础 XHTTP 及部分高级参数、WS headers 和
+  TLS ALPN、基础 XHTTP、`xhttp-opts.reuse-settings`（转换为 URI 的
+  `extra.xmux`）、部分其他高级参数、WS headers 和
   `Sec-WebSocket-Protocol` early-data；不能等价转换的 smux、packet encoding、
   证书/拨号选项、其他 early-data 模式等会明确拒绝，而不是降级到默认语义。
   WS 非 Host headers 可存为 JSON，但不可无损转 URI。
   WS/gRPC 采用 Mihomo 实际生效的 HTTP/1.1/h2 ALPN；RAW TLS 没有显式 ALPN
   时拒绝转换，避免将无 ALPN 悄悄改为 Xray 默认 h2/http/1.1。未指定 TLS
   client-fingerprint 时以 Xray `unsafe` 表达 Go TLS（并非跳过证书验证）。
+- `reuse-settings` 与 outbound `smux` 不等价。XMUX 保留显式限制和范围，
+  不承诺 Mihomo 与 Xray 的连接池行为完全相同；拒绝空对象或全零设置，
+  因为该配置在 Xray 会启用新的默认限制。
 - URI 列表、Mihomo proxies、Xray outbounds 中混入未支持协议或非法条目时整批
   失败，订阅刷新不会以一个不完整子集替换已有节点。完整 Xray 根配置仍只导入
   outbound，不导入路由/DNS/inbound。

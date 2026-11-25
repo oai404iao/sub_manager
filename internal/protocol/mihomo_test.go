@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -89,6 +90,107 @@ func TestMihomoPreservesXHTTPOptions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(node.XHTTPExtra, want) {
 		t.Fatalf("round-trip lost extra: %#v", outbound)
+	}
+}
+
+func TestMihomoXHTTPXMUXRoundTrip(t *testing.T) {
+	const yamlInput = `proxies:
+  - name: xmux
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    network: xhttp
+    xhttp-opts:
+      path: /split
+      reuse-settings:
+        max-concurrency: "16-32"
+        max-connections: 0
+        c-max-reuse-times: "0"
+        h-max-request-times: "600-900"
+        h-max-reusable-secs: 1800
+        h-keep-alive-period: -1
+`
+	const jsonInput = `{"proxies":[{"name":"xmux","type":"vless","server":"example.com","port":443,
+"uuid":"11111111-1111-1111-1111-111111111111","tls":true,"network":"xhttp",
+"xhttp-opts":{"path":"/split","reuse-settings":{"max-concurrency":"0-0","max-connections":"2-4","h-keep-alive-period":0}}}]}`
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"YAML", yamlInput, `{"xmux":{"maxConcurrency":"16-32","maxConnections":0,"cMaxReuseTimes":"0","hMaxRequestTimes":"600-900","hMaxReusableSecs":1800,"hKeepAlivePeriod":-1}}`},
+		{"JSON", jsonInput, `{"xmux":{"maxConcurrency":"0-0","maxConnections":"2-4","hKeepAlivePeriod":0}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes, err := ParseText(tc.input)
+			if err != nil || len(nodes) != 1 {
+				t.Fatalf("import = %#v, %v", nodes, err)
+			}
+			var want map[string]any
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			data, err := XrayOutboundJSON(nodes[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outbound map[string]any
+			if err := json.Unmarshal(data, &outbound); err != nil {
+				t.Fatal(err)
+			}
+			stream, _ := mapFromMap(outbound, "streamSettings")
+			xhttp, _ := mapFromMap(stream, "xhttpSettings")
+			if _, hasMux := outbound["mux"]; hasMux || xhttp["xmux"] != nil || !reflect.DeepEqual(xhttp["extra"], want) {
+				t.Fatalf("incorrect Xray XMUX settings: %s", data)
+			}
+			uri, err := URI(nodes[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := url.Parse(uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := parsed.Query()
+			var extra map[string]any
+			if err := json.Unmarshal([]byte(q.Get("extra")), &extra); err != nil || q.Has("xmux") || !reflect.DeepEqual(extra, want) {
+				t.Fatalf("incorrect URI XMUX settings: %s (%v)", uri, err)
+			}
+			node, err := ParseURI(uri)
+			if err != nil || !reflect.DeepEqual(node.XHTTPExtra, want) {
+				t.Fatalf("URI round-trip extra = %#v, %v", node.XHTTPExtra, err)
+			}
+		})
+	}
+}
+
+func TestMihomoXHTTPXMUXRejectsInvalidSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		settings   any
+	}{
+		{"null", "必须为对象", nil},
+		{"scalar", "必须为对象", "disabled"},
+		{"empty", "XMUX 默认值", map[string]any{}},
+		{"zero", "XMUX 默认值", map[string]any{"max-concurrency": "0-0", "max-connections": 0, "h-keep-alive-period": 0}},
+		{"conflict", "上限不能同时大于 0", map[string]any{"max-connections": 2, "max-concurrency": "0-4"}},
+		{"reversed", "max-concurrency", map[string]any{"max-concurrency": "4-2"}},
+		{"negative", "max-concurrency", map[string]any{"max-concurrency": -1}},
+		{"fraction", "max-concurrency", map[string]any{"max-concurrency": 0.5}},
+		{"overflow", "max-concurrency", map[string]any{"max-concurrency": "1-2147483648"}},
+		{"null range", "max-concurrency", map[string]any{"max-concurrency": nil}},
+		{"unknown", "future-option", map[string]any{"max-concurrency": 2, "future-option": true}},
+		{"keepalive range", "整数秒", map[string]any{"h-keep-alive-period": "1-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := mihomoTestProxy()
+			bad["network"] = "xhttp"
+			bad["xhttp-opts"] = map[string]any{"reuse-settings": tc.settings}
+			nodes, recognized, err := parseMihomoProxies([]map[string]any{mihomoTestProxy(), bad})
+			if err == nil || !recognized || nodes != nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unexpected import result: %#v, %v, %v", nodes, recognized, err)
+			}
+		})
 	}
 }
 

@@ -345,7 +345,13 @@ func buildXrayOutbound(node model.Node) (map[string]any, error) {
 			header["type"] = node.HeaderType
 		}
 	case "xhttp":
-		xhttp := ensureChildMap(stream, "xhttpSettings")
+		xhttp, ok := firstMap(stream, "xhttpSettings", "splithttpSettings")
+		if !ok {
+			xhttp = map[string]any{}
+		} else if _, canonical := mapFromMap(stream, "xhttpSettings"); !canonical {
+			delete(stream, "splithttpSettings")
+		}
+		stream["xhttpSettings"] = xhttp
 		setOrDelete(xhttp, "host", node.Host)
 		setOrDelete(xhttp, "path", node.Path)
 		setOrDelete(xhttp, "mode", node.XHTTPMode)
@@ -561,7 +567,7 @@ func validateVLESS(node model.Node) error {
 			return err
 		}
 	}
-	if err := validateTransportSettings(method, stream); err != nil {
+	if err := validateTransportSettings(method, stream, node.XHTTPExtra); err != nil {
 		return err
 	}
 	if node.XrayOutbound != nil {
@@ -745,7 +751,7 @@ func validatePinnedCerts(value string) error {
 	return nil
 }
 
-func validateTransportSettings(method string, stream map[string]any) error {
+func validateTransportSettings(method string, stream, xhttpExtra map[string]any) error {
 	switch method {
 	case "xhttp":
 		settings, _ := firstMap(stream, "xhttpSettings", "splithttpSettings")
@@ -754,8 +760,17 @@ func validateTransportSettings(method string, stream map[string]any) error {
 		default:
 			return fmt.Errorf("unsupported XHTTP mode %q", mode)
 		}
-		if headers, ok := mapFromMap(settings, "headers"); ok && headerValue(headers, "host") != "" {
+		effective := settings
+		if xhttpExtra != nil {
+			effective = xhttpExtra
+		} else if _, hasExtra := settings["extra"]; hasExtra {
+			effective, _ = mapFromMap(settings, "extra")
+		}
+		if headers, ok := mapFromMap(effective, "headers"); ok && headerValue(headers, "host") != "" {
 			return errors.New(`XHTTP headers cannot contain "host"; use xhttpSettings.host`)
+		}
+		if err := validateXrayXMUX(effective["xmux"]); err != nil {
+			return err
 		}
 	case "websocket":
 		settings, _ := mapFromMap(stream, "wsSettings")
@@ -788,6 +803,60 @@ func validateTransportSettings(method string, stream map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func validateXrayXMUX(value any) error {
+	if value == nil {
+		return nil
+	}
+	xmux, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("XHTTP xmux 必须为 JSON 对象")
+	}
+	var positiveLimits int
+	for _, key := range []string{"maxConnections", "maxConcurrency", "cMaxReuseTimes", "hMaxRequestTimes", "hMaxReusableSecs"} {
+		upper, err := xrayXMUXRangeUpper(xmux[key])
+		if err != nil {
+			return fmt.Errorf("XHTTP xmux.%s 必须为 32 位整数或整数字符串范围", key)
+		}
+		if upper > 0 && (key == "maxConnections" || key == "maxConcurrency") {
+			positiveLimits++
+		}
+	}
+	if positiveLimits > 1 {
+		return errors.New("XHTTP XMUX 的 maxConnections 与 maxConcurrency 上限不能同时大于 0")
+	}
+	data, err := json.Marshal(xmux["hKeepAlivePeriod"])
+	var keepAlive int64
+	if err != nil || json.Unmarshal(data, &keepAlive) != nil {
+		return errors.New("XHTTP xmux.hKeepAlivePeriod 必须为整数秒")
+	}
+	return nil
+}
+
+func xrayXMUXRangeUpper(value any) (int64, error) {
+	if text, ok := value.(string); ok {
+		if text == "" {
+			return 0, nil
+		}
+		// Ignore the first character when seeking a separator so negative bounds work.
+		if sep := strings.IndexByte(text[1:], '-'); sep >= 0 {
+			left, err := strconv.ParseInt(text[:sep+1], 10, 32)
+			if err != nil {
+				return 0, err
+			}
+			right, err := strconv.ParseInt(text[sep+2:], 10, 32)
+			return max(left, right), err
+		}
+		return strconv.ParseInt(text, 10, 32)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0, err
+	}
+	var integer int32
+	err = json.Unmarshal(data, &integer)
+	return int64(integer), err
 }
 
 func validateMux(mux map[string]any) error {

@@ -33,6 +33,9 @@ const (
 	maxBatchNodes              = 500
 	maxBatchGroups             = 100
 	maxBatchGroupRelationships = 10000
+	shareContentBase64         = "subscription"
+	shareContentURI            = "nodes"
+	shareContentMihomo         = "mihomo"
 )
 
 type Server struct {
@@ -256,6 +259,14 @@ func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeNode(&node)
+	if err := protocol.NormalizeHysteria2(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := protocol.NormalizeMieru(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := protocol.EnsureXrayOutbound(&node); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -332,8 +343,9 @@ func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	format := strings.ToLower(strings.TrimSpace(request.Format))
-	if format != "uri" && format != "base64" {
-		writeError(w, http.StatusBadRequest, "format 必须为 uri 或 base64")
+	render := nodeRenderer(format)
+	if render == nil {
+		writeError(w, http.StatusBadRequest, "format 必须为 uri、base64 或 mihomo")
 		return
 	}
 	nodes, err := s.store.NodesByIDs(r.Context(), ids)
@@ -345,17 +357,14 @@ func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	for index := range nodes {
-		if protocol.EnsureXrayOutbound(&nodes[index]) == nil {
-			_ = protocol.ApplyXrayOutbound(&nodes[index])
+	if format != "mihomo" {
+		for index := range nodes {
+			if protocol.EnsureXrayOutbound(&nodes[index]) == nil {
+				_ = protocol.ApplyXrayOutbound(&nodes[index])
+			}
 		}
 	}
-	var content string
-	if format == "uri" {
-		content, err = protocol.FullContent(nodes)
-	} else {
-		content, err = protocol.Subscription(nodes)
-	}
+	content, err := render(nodes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "导出节点失败: "+err.Error())
 		return
@@ -364,6 +373,19 @@ func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) {
 		"content": content,
 		"count":   len(nodes),
 	})
+}
+
+func nodeRenderer(format string) func([]model.Node) (string, error) {
+	switch format {
+	case "uri":
+		return protocol.FullContent
+	case "base64":
+		return protocol.Subscription
+	case "mihomo":
+		return protocol.MihomoYAML
+	default:
+		return nil
+	}
 }
 
 func (s *Server) updateNodeGroups(w http.ResponseWriter, r *http.Request) {
@@ -598,6 +620,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Kind         string `json:"kind"`
 		ID           int64  `json:"id"`
+		Format       string `json:"format"`
 		ExpiresHours int    `json:"expires_hours"`
 		Permanent    bool   `json:"permanent"`
 	}
@@ -606,6 +629,18 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Kind != "node" && request.Kind != "group" {
 		writeError(w, http.StatusBadRequest, "kind 必须为 node 或 group")
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(request.Format))
+	var content string
+	switch format {
+	case "", "base64":
+		format = "base64"
+		content = shareContentBase64
+	case "mihomo":
+		content = shareContentMihomo
+	default:
+		writeError(w, http.StatusBadRequest, "format 必须为 base64 或 mihomo")
 		return
 	}
 	if request.ExpiresHours < 1 {
@@ -619,7 +654,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "没有可分享的节点")
 		return
 	}
-	if _, err := protocol.Subscription(nodes); err != nil {
+	if _, err := nodeRenderer(format)(nodes); err != nil {
 		writeError(w, http.StatusBadRequest, "无法分享: "+err.Error())
 		return
 	}
@@ -650,7 +685,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		Kind:       request.Kind,
 		TargetID:   request.ID,
 		TargetName: targetName,
-		URL:        s.managedSignedURL(shareToken, request.Kind, request.ID, "subscription", exp),
+		URL:        s.managedSignedURL(shareToken, request.Kind, request.ID, content, exp),
 		TokenHash:  tokenHash,
 		ExpiresAt:  expiresAt,
 	})
@@ -750,21 +785,22 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "nodes not found")
 		return
 	}
-	var output string
-	switch contentType {
-	case "subscription":
-		output, err = protocol.Subscription(nodes)
-	case "nodes":
-		output, err = protocol.FullContent(nodes)
-	default:
+	format := shareFormat(contentType)
+	render := nodeRenderer(format)
+	if render == nil {
 		writeError(w, http.StatusBadRequest, "invalid content type")
 		return
 	}
+	output, err := render(nodes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "无法分享: "+err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	mimeType := "text/plain; charset=utf-8"
+	if format == "mihomo" {
+		mimeType = "application/yaml"
+	}
+	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	_, _ = io.WriteString(w, output)
 }
@@ -801,6 +837,9 @@ func (s *Server) shareNodes(ctx context.Context, kind string, id int64) ([]model
 }
 
 func decorateShare(item *model.Share, nodes []model.Node) {
+	if parsed, err := url.Parse(item.URL); err == nil {
+		item.Format = shareFormat(parsed.Query().Get("content"))
+	}
 	item.QRURL = qrURL(item.URL)
 	item.Expired = item.ExpiresAt != nil && time.Now().Unix() > item.ExpiresAt.Unix()
 	if item.Kind != "node" || len(nodes) != 1 {
@@ -809,6 +848,19 @@ func decorateShare(item *model.Share, nodes []model.Node) {
 	uri, err := protocol.URI(nodes[0])
 	if err == nil {
 		item.QRURIURL = qrURL(uri)
+	}
+}
+
+func shareFormat(content string) string {
+	switch content {
+	case shareContentBase64:
+		return "base64"
+	case shareContentURI:
+		return "uri"
+	case shareContentMihomo:
+		return "mihomo"
+	default:
+		return ""
 	}
 }
 
