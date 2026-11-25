@@ -52,6 +52,7 @@ type mihomoVLESS struct {
 		PaddingBytes    string            `json:"x-padding-bytes"`
 		MaxPostBytes    string            `json:"sc-max-each-post-bytes"`
 		MinPostInterval string            `json:"sc-min-posts-interval-ms"`
+		ReuseSettings   json.RawMessage   `json:"reuse-settings"`
 	} `json:"xhttp-opts"`
 }
 
@@ -77,6 +78,81 @@ func decodeMihomo(proxy map[string]any, target any) error {
 	return decoder.Decode(target)
 }
 
+var mihomoXMUXFields = map[string]string{
+	"max-concurrency":     "maxConcurrency",
+	"max-connections":     "maxConnections",
+	"c-max-reuse-times":   "cMaxReuseTimes",
+	"h-max-request-times": "hMaxRequestTimes",
+	"h-max-reusable-secs": "hMaxReusableSecs",
+	"h-keep-alive-period": "hKeepAlivePeriod",
+}
+
+func mihomoXHTTPXMUX(raw json.RawMessage) (map[string]any, error) {
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
+		return nil, errors.New("reuse-settings 必须为对象")
+	}
+	xmux := make(map[string]any, len(settings))
+	var nonzero bool
+	for key, raw := range settings {
+		xrayKey, ok := mihomoXMUXFields[key]
+		if !ok {
+			return nil, fmt.Errorf("不支持的 reuse-settings 字段 %q", key)
+		}
+		if key == "h-keep-alive-period" {
+			var seconds int64
+			if err := json.Unmarshal(raw, &seconds); err != nil || string(raw) == "null" {
+				return nil, errors.New("reuse-settings.h-keep-alive-period 必须为整数秒")
+			}
+			xmux[xrayKey] = seconds
+			nonzero = nonzero || seconds != 0
+			continue
+		}
+		value, upper, err := mihomoXMUXRange(raw)
+		if err != nil {
+			return nil, fmt.Errorf("reuse-settings.%s: %w", key, err)
+		}
+		xmux[xrayKey] = value
+		nonzero = nonzero || upper > 0
+	}
+	// Xray injects nonzero defaults for an empty or all-zero XMUX config.
+	if !nonzero {
+		return nil, errors.New("空的或全为 0 的 reuse-settings 会触发 Xray 的 XMUX 默认值，无法直接转换")
+	}
+	return xmux, nil
+}
+
+func mihomoXMUXRange(raw json.RawMessage) (any, int64, error) {
+	if raw[0] == '"' {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, 0, err
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return value, 0, nil
+		}
+		left, right, hasRange := strings.Cut(value, "-")
+		left, right = strings.TrimSpace(left), strings.TrimSpace(right)
+		low, err := strconv.ParseInt(left, 10, 32)
+		if err == nil && low >= 0 {
+			if !hasRange {
+				return left, low, nil
+			}
+			high, err := strconv.ParseInt(right, 10, 32)
+			if err == nil && high >= low {
+				return left + "-" + right, high, nil
+			}
+		}
+	} else {
+		var value int32
+		if err := json.Unmarshal(raw, &value); err == nil && value >= 0 && string(raw) != "null" {
+			return value, int64(value), nil
+		}
+	}
+	return nil, 0, errors.New("必须为 0..2147483647 范围内的非负整数或正序整数字符串范围")
+}
+
 func parseMihomoProxies(proxies []map[string]any) ([]model.Node, bool, error) {
 	nodes := make([]model.Node, 0, len(proxies))
 	for index, proxy := range proxies {
@@ -95,6 +171,10 @@ func parseMihomoProxies(proxies []map[string]any) ([]model.Node, bool, error) {
 func parseMihomoProxy(proxy map[string]any) (model.Node, error) {
 	var node model.Node
 	switch lowerString(proxy["type"]) {
+	case "hysteria2":
+		return parseMihomoHysteria2(proxy)
+	case "mieru":
+		return parseMihomoMieru(proxy)
 	case "socks", "socks5":
 		var p mihomoSOCKS
 		if err := decodeMihomo(proxy, &p); err != nil {
@@ -138,8 +218,12 @@ func parseMihomoProxy(proxy map[string]any) (model.Node, error) {
 				node.Extra["support-x25519mlkem768"] = "true"
 			}
 		}
-		if !p.TLS && (p.ServerName != "" || p.Fingerprint != "" || p.SkipCertVerify || len(p.ALPN) > 0) {
+		plainXHTTP := p.Network == "xhttp" && len(p.ALPN) == 1 && p.ALPN[0] == "http/1.1"
+		if !p.TLS && (p.ServerName != "" || p.Fingerprint != "" || p.SkipCertVerify || (len(p.ALPN) > 0 && !plainXHTTP)) {
 			return node, errors.New("TLS 参数需要 tls: true")
+		}
+		if !p.TLS && plainXHTTP {
+			node.ALPN = nil // Mihomo uses ALPN to select H1 here; Xray selects H1 without TLS.
 		}
 		// Mihomo uses Go TLS without a client fingerprint; Xray defaults to Chrome.
 		if node.Security == "tls" && (p.Fingerprint == "" || p.Fingerprint == "none") {
@@ -237,6 +321,13 @@ func parseMihomoProxy(proxy map[string]any) (model.Node, error) {
 				if value != "" {
 					node.XHTTPExtra[key] = value
 				}
+			}
+			if x.ReuseSettings != nil {
+				xmux, err := mihomoXHTTPXMUX(x.ReuseSettings)
+				if err != nil {
+					return node, fmt.Errorf("xhttp-opts: %w", err)
+				}
+				node.XHTTPExtra["xmux"] = xmux
 			}
 		}
 		if err := EnsureXrayOutbound(&node); err != nil {

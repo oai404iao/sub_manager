@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/oai404iao/sub_manager/internal/config"
 	"github.com/oai404iao/sub_manager/internal/model"
 	"github.com/oai404iao/sub_manager/internal/protocol"
@@ -108,6 +110,84 @@ func TestNodeMihomoExtensionUpdate(t *testing.T) {
 	}
 }
 
+func TestHysteria2NodeEditAndShare(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	server := New(config.Config{SigningKey: "test-signing-key"}, database)
+	handler := server.Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password"}, nil)
+	cookie := login.Result().Cookies()[0]
+	node := model.Node{Name: "Hy2 test", Protocol: "hysteria2", Server: "example.com", Port: 443, Password: "test:auth"}
+	created := performJSONRequest(t, handler, http.MethodPost, "/api/nodes", node, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &node); err != nil {
+		t.Fatal(err)
+	}
+	node.Hysteria2 = &model.Hysteria2Options{Ports: " 5000-5002, 8443 ", Obfs: "salamander", ObfsPassword: "test-obfs"}
+	updated := performJSONRequest(t, handler, http.MethodPut, "/api/nodes/"+strconv.FormatInt(node.ID, 10), node, cookie)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", updated.Code, updated.Body.String())
+	}
+	shared := performJSONRequest(t, handler, http.MethodGet, server.signedURL("node", node.ID, "subscription", 0), nil, nil)
+	if shared.Code != http.StatusOK {
+		t.Fatalf("share: %d %s", shared.Code, shared.Body.String())
+	}
+	nodes, err := protocol.ParseText(shared.Body.String())
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("parse share: %v", err)
+	}
+	got := nodes[0]
+	if got.Protocol != "hysteria2" || got.Password != node.Password || !got.TLS || !got.UDP || got.Port != 5000 || got.Hysteria2 == nil || got.Hysteria2.Ports != "5000-5002,8443" || got.Hysteria2.ObfsPassword != "test-obfs" {
+		t.Fatalf("Hy2 share changed node: %+v", got)
+	}
+}
+
+func TestMieruNodeEditAndShare(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	server := New(config.Config{SigningKey: "test-signing-key"}, database)
+	handler := server.Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password"}, nil)
+	cookie := login.Result().Cookies()[0]
+	node := model.Node{
+		Name: "Mieru test", Protocol: "mieru", Server: "example.com", Username: "demo", Password: "test+auth", UDP: true,
+		Mieru: &model.MieruOptions{Profile: "demo", Bindings: []model.MieruBinding{{Port: "443", Transport: "TCP"}}},
+	}
+	response := performJSONRequest(t, handler, http.MethodPost, "/api/nodes", node, cookie)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &node); err != nil {
+		t.Fatal(err)
+	}
+	node.Mieru.Bindings = []model.MieruBinding{{Port: " 5000-5002 ", Transport: "UDP"}, {Port: "443", Transport: "TCP"}}
+	response = performJSONRequest(t, handler, http.MethodPut, "/api/nodes/"+strconv.FormatInt(node.ID, 10), node, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("edit: %d %s", response.Code, response.Body.String())
+	}
+	response = performJSONRequest(t, handler, http.MethodGet, server.signedURL("node", node.ID, "subscription", 0), nil, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("share: %d %s", response.Code, response.Body.String())
+	}
+	nodes, err := protocol.ParseText(response.Body.String())
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("parse share: %v", err)
+	}
+	got := nodes[0]
+	if got.Port != 5000 || got.Password != node.Password || got.Mieru == nil || len(got.Mieru.Bindings) != 2 ||
+		got.Mieru.Bindings[0] != (model.MieruBinding{Port: "5000-5002", Transport: "UDP"}) || got.Mieru.Bindings[1] != node.Mieru.Bindings[1] {
+		t.Fatalf("Mieru share changed node: %+v", got)
+	}
+}
+
 func TestUnshareableNodeRemainsEditable(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
@@ -118,7 +198,7 @@ func TestUnshareableNodeRemainsEditable(t *testing.T) {
 	handler := server.Handler()
 	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "password"}, nil)
 	cookie := login.Result().Cookies()[0]
-	nodes, err := protocol.ParseText(`{"protocol":"vless","settings":{"address":"example.com","port":443,"id":"test-id","encryption":"none"},"streamSettings":{"security":"tls"},"mux":{"enabled":true,"concurrency":8}}`)
+	nodes, err := protocol.ParseText(`{"protocol":"vless","settings":{"address":"example.com","port":443,"id":"11111111-1111-1111-1111-111111111111","encryption":"none"},"streamSettings":{"security":"tls"},"mux":{"enabled":true,"concurrency":8}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +225,9 @@ func TestUnshareableNodeRemainsEditable(t *testing.T) {
 		body any
 	}{
 		{"/api/shares", map[string]any{"kind": "node", "id": saved.ID}},
+		{"/api/shares", map[string]any{"kind": "node", "id": saved.ID, "format": "mihomo"}},
 		{"/api/nodes/export", map[string]any{"ids": []int64{saved.ID}, "format": "uri"}},
+		{"/api/nodes/export", map[string]any{"ids": []int64{saved.ID}, "format": "mihomo"}},
 	} {
 		response = performJSONRequest(t, handler, http.MethodPost, request.path, request.body, cookie)
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "mux") {
@@ -540,6 +622,46 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 		t.Fatalf("unexpected Base64 export: %#v decoded=%q", base64Export, decoded)
 	}
 
+	mieruNode, err := database.SaveNode(context.Background(), model.Node{
+		Name: "Mieru", Protocol: "mieru", Server: "mieru.example.com", Port: 443,
+		Username: "test", Password: "test-password",
+		Mieru: &model.MieruOptions{Profile: "test", Bindings: []model.MieruBinding{
+			{Port: "443", Transport: "TCP"},
+			{Port: "5000-5002", Transport: "UDP"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mihomoResponse := performJSONRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/api/nodes/export",
+		map[string]any{"ids": []int64{secondNode.ID, firstNode.ID, mieruNode.ID}, "format": "mihomo"},
+		cookies[0],
+	)
+	if mihomoResponse.Code != http.StatusOK {
+		t.Fatalf("Mihomo export status = %d body=%s", mihomoResponse.Code, mihomoResponse.Body.String())
+	}
+	var mihomoExport struct {
+		Content string `json:"content"`
+		Count   int    `json:"count"`
+	}
+	if err := json.NewDecoder(mihomoResponse.Body).Decode(&mihomoExport); err != nil {
+		t.Fatal(err)
+	}
+	if mihomoExport.Count != 3 {
+		t.Fatalf("Mihomo export count = %d, want 3 input nodes", mihomoExport.Count)
+	}
+	names := mihomoProxyNames(t, mihomoExport.Content)
+	if len(names) != 4 || names[0] != secondNode.Name || names[1] != firstNode.Name {
+		t.Fatalf("Mihomo proxy names = %v, want two ordered SOCKS nodes and two Mieru endpoints", names)
+	}
+	if err := database.DeleteNode(context.Background(), mieruNode.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	groupResponse := performJSONRequest(
 		t,
 		handler,
@@ -742,6 +864,131 @@ func TestBatchNodeOperationsAPI(t *testing.T) {
 	}
 }
 
+func TestMihomoShare(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	server := New(config.Config{BaseURL: "https://share.example", SigningKey: "test-signing-key"}, database)
+	handler := server.Handler()
+	login := performJSONRequest(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "admin", "password": "password",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	vless, err := protocol.ParseURI("vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls#TCP%20only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vless.UDP = false
+	for _, test := range []struct {
+		node  model.Node
+		uriQR bool
+	}{
+		{vless, false},
+		{model.Node{Name: "SOCKS", Protocol: "socks5", Server: "proxy.example.com", Port: 1080}, true},
+	} {
+		t.Run(test.node.Name, func(t *testing.T) {
+			node, err := database.SaveNode(context.Background(), test.node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := map[string]any{"kind": "node", "id": node.ID, "format": "uri", "permanent": true}
+			response := performJSONRequest(t, handler, http.MethodPost, "/api/shares", request, cookie)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("unsupported share format: %d %s", response.Code, response.Body.String())
+			}
+			request["format"] = "mihomo"
+			response = performJSONRequest(t, handler, http.MethodPost, "/api/shares", request, cookie)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("Mihomo share: %d %s", response.Code, response.Body.String())
+			}
+			var item model.Share
+			if err := json.NewDecoder(response.Body).Decode(&item); err != nil {
+				t.Fatal(err)
+			}
+			if item.Format != "mihomo" || item.QRURL == "" || (item.QRURIURL != "") != test.uriQR {
+				t.Fatalf("unexpected Mihomo share: %#v", item)
+			}
+			signedURL, err := url.Parse(item.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := signedURL.Query().Get("content"); got != "mihomo" {
+				t.Fatalf("signed content = %q, want mihomo", got)
+			}
+			response = performJSONRequest(t, handler, http.MethodGet, signedURL.RequestURI(), nil, nil)
+			if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/yaml" {
+				t.Fatalf("public Mihomo share: %d %s %s", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+			}
+			if names := mihomoProxyNames(t, response.Body.String()); len(names) != 1 || names[0] != node.Name {
+				t.Fatalf("public proxy names = %v, want one node %q", names, node.Name)
+			}
+
+			for _, content := range []string{"subscription", "MIHOMO"} {
+				tampered := *signedURL
+				query := tampered.Query()
+				query.Set("content", content)
+				tampered.RawQuery = query.Encode()
+				response := performJSONRequest(t, handler, http.MethodGet, tampered.RequestURI(), nil, nil)
+				if response.Code != http.StatusForbidden {
+					t.Fatalf("tampered content %q: %d %s", content, response.Code, response.Body.String())
+				}
+			}
+
+			response = performJSONRequest(t, handler, http.MethodGet, "/api/state", nil, cookie)
+			var state model.State
+			if response.Code != http.StatusOK {
+				t.Fatalf("state: %d %s", response.Code, response.Body.String())
+			}
+			if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Shares) == 0 || state.Shares[0].ID != item.ID || state.Shares[0].Format != "mihomo" {
+				t.Fatalf("unexpected share history: %#v", state.Shares)
+			}
+
+			response = performJSONRequest(t, handler, http.MethodPost, "/api/shares/"+strconv.FormatInt(item.ID, 10)+"/revoke", nil, cookie)
+			if response.Code != http.StatusOK {
+				t.Fatalf("revoke: %d %s", response.Code, response.Body.String())
+			}
+			var revoked model.Share
+			if err := json.NewDecoder(response.Body).Decode(&revoked); err != nil {
+				t.Fatal(err)
+			}
+			if !revoked.Revoked || revoked.Format != "mihomo" {
+				t.Fatalf("unexpected revoked share: %#v", revoked)
+			}
+			response = performJSONRequest(t, handler, http.MethodGet, signedURL.RequestURI(), nil, nil)
+			if response.Code != http.StatusGone {
+				t.Fatalf("revoked public share: %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func mihomoProxyNames(t *testing.T, content string) []string {
+	t.Helper()
+	var document map[string][]struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal([]byte(content), &document); err != nil {
+		t.Fatal(err)
+	}
+	proxies, ok := document["proxies"]
+	if len(document) != 1 || !ok {
+		t.Fatalf("expected a proxies-only YAML document: %s", content)
+	}
+	names := make([]string, len(proxies))
+	for i, proxy := range proxies {
+		names[i] = proxy.Name
+	}
+	return names
+}
+
 func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"), "admin", "password")
 	if err != nil {
@@ -845,6 +1092,9 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	if nodeShare.URL == "" || nodeShare.QRURL == "" || nodeShare.QRURIURL == "" {
 		t.Fatalf("node share is missing URL or QR codes: %#v", nodeShare)
 	}
+	if nodeShare.Format != "base64" {
+		t.Fatalf("default share format = %q, want base64", nodeShare.Format)
+	}
 	if nodeShare.Permanent || nodeShare.ExpiresAt == nil {
 		t.Fatalf("node share should expire: %#v", nodeShare)
 	}
@@ -878,6 +1128,7 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	groupResponse := performJSONRequest(t, handler, http.MethodPost, "/api/shares", map[string]any{
 		"kind":      "group",
 		"id":        group.ID,
+		"format":    "base64",
 		"permanent": true,
 	}, cookies[0])
 	if groupResponse.Code != http.StatusCreated {
@@ -911,6 +1162,9 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	)
 	if publicResponse.Code != http.StatusOK {
 		t.Fatalf("public share status = %d body=%s", publicResponse.Code, publicResponse.Body.String())
+	}
+	if got := publicResponse.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("Base64 content type = %q", got)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicResponse.Body.String()))
 	if err != nil {
@@ -958,10 +1212,10 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	if len(state.Shares) != 2 {
 		t.Fatalf("share history count = %d, want 2", len(state.Shares))
 	}
-	if state.Shares[0].ID != groupShare.ID || state.Shares[0].QRURIURL != "" {
+	if state.Shares[0].ID != groupShare.ID || state.Shares[0].QRURIURL != "" || state.Shares[0].Format != "base64" {
 		t.Fatalf("unexpected group share history: %#v", state.Shares[0])
 	}
-	if state.Shares[1].ID != nodeShare.ID || state.Shares[1].QRURIURL == "" {
+	if state.Shares[1].ID != nodeShare.ID || state.Shares[1].QRURIURL == "" || state.Shares[1].Format != "base64" {
 		t.Fatalf("unexpected node share history: %#v", state.Shares[1])
 	}
 
@@ -984,7 +1238,7 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 	if err := json.NewDecoder(revokeResponse.Body).Decode(&revokedShare); err != nil {
 		t.Fatal(err)
 	}
-	if !revokedShare.Revoked || revokedShare.RevokedAt == nil {
+	if !revokedShare.Revoked || revokedShare.RevokedAt == nil || revokedShare.Format != "base64" {
 		t.Fatalf("share was not revoked: %#v", revokedShare)
 	}
 	revokedPublicResponse := httptest.NewRecorder()
@@ -1078,6 +1332,13 @@ func TestShareHistoryPermanentAndQRCodeVariants(t *testing.T) {
 			legacyRevokeResponse.Code,
 			legacyRevokeResponse.Body.String(),
 		)
+	}
+	var legacyRevokedShare model.Share
+	if err := json.NewDecoder(legacyRevokeResponse.Body).Decode(&legacyRevokedShare); err != nil {
+		t.Fatal(err)
+	}
+	if !legacyRevokedShare.Revoked || legacyRevokedShare.Format != "uri" {
+		t.Fatalf("unexpected legacy revoked share: %#v", legacyRevokedShare)
 	}
 	revokedLegacyResponse := httptest.NewRecorder()
 	handler.ServeHTTP(

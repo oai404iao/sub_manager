@@ -53,12 +53,34 @@ type Node struct {
 	FinalMask      map[string]any    `json:"final_mask,omitempty"`
 	UDP            bool              `json:"udp"`
 	TLS            bool              `json:"tls"`
+	Hysteria2      *Hysteria2Options `json:"hysteria2,omitempty"`
+	Mieru          *MieruOptions     `json:"mieru,omitempty"`
 	Extra          map[string]string `json:"extra,omitempty"`
 	XrayOutbound   map[string]any    `json:"xray_outbound,omitempty"`
 	GroupIDs       []int64           `json:"group_ids"`
 	SubscriptionID *int64            `json:"subscription_id,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type Hysteria2Options struct {
+	Ports        string `json:"ports,omitempty"`
+	Obfs         string `json:"obfs,omitempty"`
+	ObfsPassword string `json:"obfs_password,omitempty"`
+}
+
+type MieruOptions struct {
+	Profile        string         `json:"profile"`
+	Bindings       []MieruBinding `json:"bindings"`
+	MTU            int            `json:"mtu,omitempty"`
+	Multiplexing   string         `json:"multiplexing,omitempty"`
+	HandshakeMode  string         `json:"handshake_mode,omitempty"`
+	TrafficPattern string         `json:"traffic_pattern,omitempty"`
+}
+
+type MieruBinding struct {
+	Port      string `json:"port"`
+	Transport string `json:"transport"`
 }
 
 type Subscription struct {
@@ -78,6 +100,7 @@ type Share struct {
 	TargetID   int64      `json:"target_id"`
 	TargetName string     `json:"target_name"`
 	URL        string     `json:"url"`
+	Format     string     `json:"format"`
 	QRURL      string     `json:"qr_url,omitempty"`
 	QRURIURL   string     `json:"qr_uri_url,omitempty"`
 	TokenHash  string     `json:"-"`

@@ -3,7 +3,9 @@ package protocol
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,55 @@ func TestShareJSONEncoding(t *testing.T) {
 	}
 }
 
+func TestXHTTPXMUXShareRoundTrip(t *testing.T) {
+	const extraJSON = `{"xmux":{"maxConnections":"2-4","hKeepAlivePeriod":30},"headers":{"X-Test":"a+b c"}}`
+	uri := shareTestURI + "&type=xhttp&path=%2Fx&mode=stream-up&extra=" + strings.ReplaceAll(url.QueryEscape(extraJSON), "+", "%20")
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal([]byte(extraJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(node.XHTTPExtra, want) {
+		t.Fatalf("imported xhttp_extra = %#v", node.XHTTPExtra)
+	}
+	raw, err := URI(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(parsed.RawQuery, "a%2Bb%20c") || parsed.Query().Has("xmux") {
+		t.Fatalf("expected percent-encoded JSON within extra: %s", raw)
+	}
+	roundTrip, err := ParseURI(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(roundTrip.XHTTPExtra, want) || roundTrip.Path != "/x" || roundTrip.XHTTPMode != "stream-up" {
+		t.Fatalf("round-trip XHTTP fields changed: %+v", roundTrip)
+	}
+}
+
+func TestXHTTPXMUXValidatesEffectiveSettings(t *testing.T) {
+	const conflict = `{"xmux":{"maxConnections":"1-3","maxConcurrency":2}}`
+	if _, err := ParseURI(shareTestURI + "&type=xhttp&extra=" + url.QueryEscape(conflict)); err == nil || !strings.Contains(err.Error(), "不能同时") {
+		t.Fatalf("unexpected invalid XMUX result: %v", err)
+	}
+	base := `{"protocol":"vless","settings":{"address":"example.com","port":443,"id":"test","encryption":"none"},"streamSettings":{"method":"xhttp","security":"tls","xhttpSettings":%s}}`
+	if _, err := ParseText(fmt.Sprintf(base, conflict)); err == nil || !strings.Contains(err.Error(), "不能同时") {
+		t.Fatalf("unexpected invalid outer XMUX result: %v", err)
+	}
+	inner := `{"xmux":{"maxConnections":3,"maxConcurrency":0,"hKeepAlivePeriod":-1}}`
+	if _, err := ParseText(fmt.Sprintf(base, strings.TrimSuffix(conflict, "}")+`,"extra":`+inner+`}`)); err != nil {
+		t.Fatalf("outer XMUX was not ignored: %v", err)
+	}
+}
+
 func TestShareProjectionBoundary(t *testing.T) {
 	base := `{"protocol":"vless","settings":{"address":"example.com","port":443,"id":"audit-id","encryption":"none"},"streamSettings":{"method":"xhttp","security":"tls","xhttpSettings":{"path":"/","xmux":{"maxConnections":"2-4"},"headers":{"X-Test":"audit"}}}}`
 	nodes, err := ParseText(base)
@@ -54,6 +105,13 @@ func TestShareProjectionBoundary(t *testing.T) {
 	if !strings.Contains(u.Query().Get("extra"), `"xmux"`) || !strings.Contains(u.Query().Get("extra"), `"headers"`) {
 		t.Fatal(raw)
 	}
+	legacyNodes, err := ParseText(strings.Replace(base, `"xhttpSettings"`, `"splithttpSettings"`, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyURI, err := URI(legacyNodes[0]); err != nil || legacyURI != raw {
+		t.Fatalf("legacy XHTTP settings were lost: %s (%v)", legacyURI, err)
+	}
 	// Xray ignores all outer advanced options when extra is supplied.
 	replaced := node
 	replaced.XrayOutbound = cloneMap(node.XrayOutbound)
@@ -67,7 +125,7 @@ func TestShareProjectionBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, _ := url.Parse(replacementURI)
-	if strings.Contains(r.Query().Get("extra"), "X-Test") || !strings.Contains(r.Query().Get("extra"), "noGRPCHeader") {
+	if extra := r.Query().Get("extra"); strings.Contains(extra, "X-Test") || strings.Contains(extra, "xmux") || !strings.Contains(extra, "noGRPCHeader") {
 		t.Fatal(replacementURI)
 	}
 	for _, field := range []string{"mux", "sockopt", "tls", "hysteria"} {

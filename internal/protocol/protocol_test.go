@@ -560,14 +560,15 @@ func TestGeneratedOutboundWithOfficialXray(t *testing.T) {
 		Host:        "example.com",
 		Path:        "/api",
 		UDP:         true,
+		XHTTPMode:   "stream-up",
+		XHTTPExtra: map[string]any{
+			"xPaddingBytes": "100-1000",
+			"xmux": map[string]any{
+				"maxConnections":   "2-4",
+				"hKeepAlivePeriod": 30,
+			},
+		},
 	}
-	if err := EnsureXrayOutbound(&node); err != nil {
-		t.Fatal(err)
-	}
-	stream, _ := mapFromMap(node.XrayOutbound, "streamSettings")
-	xhttp := ensureChildMap(stream, "xhttpSettings")
-	xhttp["mode"] = "stream-up"
-	xhttp["xPaddingBytes"] = "100-1000"
 	outbound, err := XrayOutboundJSON(node)
 	if err != nil {
 		t.Fatal(err)

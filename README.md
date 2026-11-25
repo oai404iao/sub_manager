@@ -35,9 +35,9 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 订阅与节点管理 | 节点、分组和订阅的创建、编辑、删除、筛选与刷新；支持节点批量删除、改组及 URI/Base64 复制，托管节点改组时整条订阅同步迁移 |
+| 订阅与节点管理 | 节点、分组和订阅的创建、编辑、删除、筛选与刷新；支持节点批量删除、改组及 URI/Base64/Mihomo YAML 复制，托管节点改组时整条订阅同步迁移 |
 | 多层分组 | 分组可递归包含下级分组；筛选和分享时聚合并去重全部下级节点 |
-| 多格式导入 | VLESS / SOCKS5 URI、Xray JSON/YAML、Mihomo YAML、标准与 URL-safe Base64、data URI |
+| 多格式导入 | VLESS / SOCKS5 / Hysteria 2 / Mieru URI、Xray JSON/YAML、Mihomo YAML/JSON、标准与 URL-safe Base64、data URI |
 | Xray 无损往返 | 保存完整 VLESS `OutboundObject`，支持高级 JSON 编辑与单节点下载 |
 | 原子订阅刷新 | 刷新时在事务内替换订阅托管节点，避免出现半更新状态 |
 | 安全分享 | 可限时或永久的 HMAC-SHA256 单一分享 URL、可撤销和删除的分享历史，以及按对象区分的二维码 |
@@ -50,9 +50,11 @@
 | --- | :---: | :---: | --- |
 | VLESS URI | ✅ | ✅ | 支持当前传输层、TLS、REALITY、XHTTP 与 VLESS Encryption 字段 |
 | SOCKS5 URI | ✅ | ✅ | 支持用户名/密码、UDP 与 TLS 扩展参数 |
+| Hysteria 2 URI | ✅ | ✅ | 独立协议，支持认证、TLS、混淆和端口列表；详见 [Hysteria 2 边界](docs/protocols/hysteria2.md) |
+| Mieru 简单 URI | ✅ | ✅ | `mierus://`，支持多组 TCP/UDP 端口；详见 [Mieru 边界](docs/protocols/mieru.md) |
 | Xray JSON | ✅ | ✅ | 导入完整配置、单个 outbound 或 outbound 数组；导出单个 VLESS outbound |
 | Xray YAML | ✅ | — | 作为 Xray 配置导入并规范化 |
-| Mihomo YAML | ✅ | — | 当前支持 VLESS 与 SOCKS5 proxy 导入 |
+| Mihomo YAML/JSON | ✅ | YAML | 支持 VLESS、SOCKS5、Hysteria 2 与 Mieru；[导出和分享](docs/protocols/mihomo-yaml.md)仅包含 `proxies` |
 | Base64 订阅 | ✅ | ✅ | 支持标准、Raw、URL-safe 与换行内容 |
 | Base64 data URI | ✅ | — | 支持带 `;base64` 标记的 data URI |
 
@@ -199,12 +201,12 @@ make docker-build
    也可以让系统自动创建目标分组。
 2. 粘贴节点 URI、Base64 订阅、Xray 配置或 Mihomo YAML 批量导入。
 3. 在节点编辑器中维护常用字段，必要时切换到完整 Xray JSON。
-4. 在节点列表勾选一个或多个节点，可批量添加、移出或替换分组，复制多行 URI
-   或标准 Base64 订阅内容，也可批量删除。所选节点包含订阅托管节点时，会同步
+4. 在节点列表勾选一个或多个节点，可批量添加、移出或替换分组，复制多行 URI、
+   标准 Base64 订阅或 Mihomo YAML，也可批量删除。所选节点包含订阅托管节点时，会同步
    修改订阅目标分组，并迁移该订阅的全部节点。
-5. 为节点或分组生成限时或永久的订阅分享 URL，并可从对应对象的分享弹窗查看
-   历史记录、撤销分享或删除记录。分组分享会递归聚合并去重所有下级分组节点；
-   分组提供分享 URL 二维码，单节点还会额外提供节点 URI 二维码。
+5. 为节点或分组生成限时或永久的订阅分享 URL，格式可选 Base64 或 Mihomo YAML。
+   可从对应对象的分享弹窗查看历史、撤销分享或删除记录。分组会递归聚合并去重
+   下级分组节点；单节点有可用的原始 URI 时，还会额外提供节点 URI 二维码。
 6. 通过订阅列表手动刷新上游内容；系统会原子替换该订阅托管的节点。
 
 ## 架构

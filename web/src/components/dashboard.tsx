@@ -1,10 +1,11 @@
-import { useMemo, useState, type FormEvent } from "react"
+import { useMemo, useRef, useState, type FormEvent } from "react"
 import {
   ArrowLeftIcon,
   BanIcon,
   Code2Icon,
   CopyIcon,
   DownloadIcon,
+  FileCodeIcon,
   FileInputIcon,
   HistoryIcon,
   LinkIcon,
@@ -20,6 +21,8 @@ import {
 } from "lucide-react"
 
 import { BrandLockup } from "@/components/brand-logo"
+import { Hysteria2Fields } from "@/components/hysteria2-fields"
+import { MieruFields } from "@/components/mieru-fields"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -92,6 +95,7 @@ import {
   type NodeExportResult,
   type NodeGroupUpdateResult,
   type Share,
+  type ShareSubscriptionFormat,
   type State,
   type Subscription,
 } from "@/lib/api"
@@ -105,7 +109,9 @@ type DashboardProps = {
 const protocolItems = [
   { label: "VLESS", value: "vless" },
   { label: "SOCKS5", value: "socks5" },
-]
+  { label: "Hysteria 2", value: "hysteria2" },
+  { label: "Mieru", value: "mieru" },
+] satisfies { label: string; value: Node["protocol"] }[]
 const networkItems = [
   { label: "RAW", value: "raw" },
   { label: "XHTTP", value: "xhttp" },
@@ -130,6 +136,7 @@ const flowItems = [
 const xhttpModeItems = ["auto", "packet-up", "stream-up", "stream-one"].map(
   (value) => ({ label: value, value })
 )
+const xhttpBasicKeys = ["host", "path", "mode"]
 const grpcModeItems = [
   { label: "gun（默认）", value: "gun" },
   { label: "multi", value: "multi" },
@@ -138,28 +145,53 @@ const shareModeItems = [
   { label: "限时分享", value: "temporary" },
   { label: "永久分享", value: "permanent" },
 ]
-const blankNode: Node = {
-  id: 0,
-  name: "",
-  protocol: "vless",
-  server: "",
-  port: 443,
-  encryption: "none",
-  network: "raw",
-  security: "tls",
-  fingerprint: "chrome",
-  allow_insecure: false,
-  grpc_multi_mode: false,
-  udp: true,
-  tls: false,
-  group_ids: [],
-  created_at: "",
-  updated_at: "",
+const nodeFormatLabels = {
+  uri: "URI",
+  base64: "Base64",
+  mihomo: "Mihomo YAML",
+} satisfies Record<NodeExportFormat, string>
+const shareFormatItems = (["base64", "mihomo"] as const).map((value) => ({
+  label: nodeFormatLabels[value],
+  value,
+}))
+
+function blankNode(protocol: Node["protocol"] = "vless"): Node {
+  return {
+    id: 0,
+    name: "",
+    protocol,
+    server: "",
+    port: 443,
+    ...(protocol === "vless"
+      ? {
+          encryption: "none",
+          network: "raw",
+          security: "tls",
+          fingerprint: "chrome",
+        }
+      : {}),
+    allow_insecure: false,
+    grpc_multi_mode: false,
+    udp: true,
+    tls: protocol === "hysteria2",
+    ...(protocol === "mieru"
+      ? {
+          mieru: {
+            profile: "",
+            bindings: [{ port: "443", transport: "TCP" }],
+          },
+        }
+      : {}),
+    group_ids: [],
+    created_at: "",
+    updated_at: "",
+  }
 }
 
 function mergeNodeIntoXray(
   source: Record<string, unknown>,
-  node: Node
+  node: Node,
+  xhttpExtra?: Record<string, unknown>
 ): Record<string, unknown> {
   const outbound = structuredClone(source)
   outbound.protocol = "vless"
@@ -190,11 +222,24 @@ function mergeNodeIntoXray(
       break
     }
     case "xhttp": {
-      const xhttp = recordValue(stream.xhttpSettings)
+      const xhttp = recordValue(
+        stream.xhttpSettings ?? stream.splithttpSettings
+      )
+      if (stream.xhttpSettings == null) delete stream.splithttpSettings
       setText(xhttp, "host", node.host)
       setText(xhttp, "path", node.path)
       setText(xhttp, "mode", node.xhttp_mode)
-      if (node.xhttp_extra) xhttp.extra = node.xhttp_extra
+      if (xhttpExtra) {
+        if (!("extra" in xhttp)) {
+          for (const key of Object.keys(xhttp)) {
+            if (!xhttpBasicKeys.includes(key)) delete xhttp[key]
+          }
+        }
+        // Keep an existing envelope even when empty so outer options stay ignored.
+        if ("extra" in xhttp || Object.keys(xhttpExtra).length > 0) {
+          xhttp.extra = xhttpExtra
+        }
+      }
       stream.xhttpSettings = xhttp
       break
     }
@@ -262,6 +307,32 @@ function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {}
+}
+
+function parseEditorObject(
+  text: string,
+  label: string
+): Record<string, unknown> {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(`${label} 不是有效的 JSON`)
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} 必须为 JSON 对象`)
+  }
+  return recordValue(value)
+}
+
+function xhttpExtraFromOutbound(outbound: Record<string, unknown>) {
+  const stream = recordValue(outbound.streamSettings)
+  const xhttp = recordValue(stream.xhttpSettings ?? stream.splithttpSettings)
+  if ("extra" in xhttp) return xhttp.extra
+  const extra = Object.fromEntries(
+    Object.entries(xhttp).filter(([key]) => !xhttpBasicKeys.includes(key))
+  )
+  return Object.keys(extra).length > 0 ? extra : undefined
 }
 
 function setText(
@@ -405,9 +476,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
       })
       await copyText(result.content)
       setNotice(
-        `已复制 ${result.count} 个节点的${
-          format === "uri" ? " URI" : " Base64"
-        } 内容。`
+        `已复制 ${result.count} 个节点的 ${nodeFormatLabels[format]} 内容。`
       )
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "复制失败")
@@ -471,7 +540,7 @@ export function Dashboard({ state, onReload, onLogout }: DashboardProps) {
 
   function openNewNode() {
     setEditingNode({
-      ...blankNode,
+      ...blankNode(),
       group_ids: groupFilter ? [groupFilter] : [],
     })
     setNodeOpen(true)
@@ -858,7 +927,7 @@ function NodeTable({
               </EmptyMedia>
               <EmptyTitle>还没有节点</EmptyTitle>
               <EmptyDescription>
-                手动创建，或粘贴 VLESS / SOCKS5 链接导入。
+                手动创建，或粘贴节点链接导入。
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
@@ -897,7 +966,9 @@ function NodeTable({
                 onClick={() => onBatchCopy("uri")}
               >
                 <LinkIcon data-icon="inline-start" />
-                {copyingFormat === "uri" ? "复制中…" : "复制 URI"}
+                {copyingFormat === "uri"
+                  ? "复制中…"
+                  : `复制 ${nodeFormatLabels.uri}`}
               </Button>
               <Button
                 variant="outline"
@@ -906,7 +977,20 @@ function NodeTable({
                 onClick={() => onBatchCopy("base64")}
               >
                 <Code2Icon data-icon="inline-start" />
-                {copyingFormat === "base64" ? "复制中…" : "复制 Base64"}
+                {copyingFormat === "base64"
+                  ? "复制中…"
+                  : `复制 ${nodeFormatLabels.base64}`}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={copyingFormat !== null}
+                onClick={() => onBatchCopy("mihomo")}
+              >
+                <FileCodeIcon data-icon="inline-start" />
+                {copyingFormat === "mihomo"
+                  ? "复制中…"
+                  : `复制 ${nodeFormatLabels.mihomo}`}
               </Button>
               <Button variant="destructive" size="sm" onClick={onBatchDelete}>
                 <Trash2Icon data-icon="inline-start" />
@@ -969,7 +1053,8 @@ function NodeTable({
                 <TableCell className="font-medium">{node.name}</TableCell>
                 <TableCell>
                   <Badge variant="secondary">
-                    {node.protocol.toUpperCase()}
+                    {protocolItems.find((item) => item.value === node.protocol)
+                      ?.label ?? node.protocol.toUpperCase()}
                   </Badge>
                 </TableCell>
                 <TableCell className="font-mono text-xs">
@@ -1390,7 +1475,8 @@ function ShareHistoryList({
             <div className="flex min-w-0 items-start justify-between gap-3">
               <div className="min-w-0">
                 <CardTitle>
-                  {share.permanent ? "永久分享" : "限时分享"}
+                  {share.permanent ? "永久分享" : "限时分享"} ·{" "}
+                  {nodeFormatLabels[share.format]}
                 </CardTitle>
                 <CardDescription>
                   创建于 {formatShareTime(share.created_at)}
@@ -1710,8 +1796,8 @@ function ImportDialog({
           <DialogHeader>
             <DialogTitle>导入节点或订阅</DialogTitle>
             <DialogDescription>
-              支持 Mihomo/Xray YAML、VLESS/SOCKS5 URI，以及标准或 URL-safe
-              Base64 订阅。
+              支持 Mihomo/Xray YAML、VLESS / SOCKS5 / Hysteria 2 /
+              Mieru（mierus://）URI，以及标准或 URL-safe Base64 订阅。
             </DialogDescription>
           </DialogHeader>
           <Tabs
@@ -1731,7 +1817,7 @@ function ImportDialog({
                   id="import-content"
                   className="max-h-[50svh] min-h-48 resize-y font-mono text-xs"
                   placeholder={
-                    "vless://...\nsocks5://...\n\n或粘贴 YAML / Base64 订阅"
+                    "vless://...\nsocks5://...\nhysteria2://...\nmierus://...\n\n或粘贴 YAML / Base64 订阅"
                   }
                   required
                   spellCheck={false}
@@ -1959,14 +2045,61 @@ function NodeDialog({
   onSaved: () => Promise<void>
 }) {
   const [draft, setDraft] = useState<Node>(node)
+  const protocolDrafts = useRef<Partial<Record<Node["protocol"], Node>>>({})
   const [error, setError] = useState("")
   const [editorMode, setEditorMode] = useState<"basic" | "advanced">("basic")
   const [advancedJSON, setAdvancedJSON] = useState(() =>
-    JSON.stringify(node.xray_outbound ?? mergeNodeIntoXray({}, node), null, 2)
+    node.protocol === "vless"
+      ? JSON.stringify(
+          node.xray_outbound ?? mergeNodeIntoXray({}, node, node.xhttp_extra),
+          null,
+          2
+        )
+      : "{}"
   )
+  const [xhttpExtraEdit, setXhttpExtraEdit] = useState<string>()
+
+  function basicOutbound(outbound: Record<string, unknown>) {
+    const xhttpExtra =
+      draft.network === "xhttp" && xhttpExtraEdit !== undefined
+        ? parseEditorObject(xhttpExtraEdit.trim() || "{}", "XHTTP Extra")
+        : undefined
+    return mergeNodeIntoXray(outbound, draft, xhttpExtra)
+  }
+
+  let xhttpExtraText = xhttpExtraEdit ?? ""
+  if (
+    draft.protocol === "vless" &&
+    draft.network === "xhttp" &&
+    editorMode === "basic" &&
+    xhttpExtraEdit === undefined
+  ) {
+    const extra = xhttpExtraFromOutbound(recordValue(JSON.parse(advancedJSON)))
+    xhttpExtraText = JSON.stringify(extra, null, 2) ?? ""
+  }
 
   function update<K extends keyof Node>(key: K, value: Node[K]) {
     setDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function changeProtocol(protocol: Node["protocol"] | null) {
+    if (!protocol || protocol === draft.protocol) return
+    protocolDrafts.current[draft.protocol] = draft
+    const previous = protocolDrafts.current[protocol]
+    const next = previous ?? blankNode(protocol)
+    setDraft({
+      ...next,
+      id: draft.id,
+      name: draft.name,
+      server: draft.server,
+      port:
+        !previous && draft.protocol !== "mieru" && protocol !== "mieru"
+          ? draft.port
+          : next.port,
+      group_ids: draft.group_ids,
+      subscription_id: draft.subscription_id,
+    })
+    setError("")
   }
 
   function setNodeGroup(groupID: number, checked: boolean) {
@@ -1984,13 +2117,11 @@ function NodeDialog({
     try {
       let payload: Node = draft
       if (draft.protocol === "vless") {
-        const parsed = JSON.parse(advancedJSON) as Record<string, unknown>
+        const parsed = parseEditorObject(advancedJSON, "Xray JSON")
         payload = {
           ...draft,
           xray_outbound:
-            editorMode === "advanced"
-              ? parsed
-              : mergeNodeIntoXray(parsed, draft),
+            editorMode === "advanced" ? parsed : basicOutbound(parsed),
         }
       } else {
         payload = { ...draft, xray_outbound: undefined }
@@ -2005,17 +2136,13 @@ function NodeDialog({
       onOpenChange(false)
       await onSaved()
     } catch (caught) {
-      setError(
-        caught instanceof SyntaxError
-          ? `Xray JSON 无效：${caught.message}`
-          : caught instanceof Error
-            ? caught.message
-            : "保存失败"
-      )
+      setError(caught instanceof Error ? caught.message : "保存失败")
     }
   }
 
   const managedNode = draft.subscription_id != null
+  const hopping =
+    draft.protocol === "hysteria2" && Boolean(draft.hysteria2?.ports?.trim())
   const managedGroupItems = groups.map((group) => ({
     label: group.name,
     value: String(group.id),
@@ -2028,7 +2155,9 @@ function NodeDialog({
           <DialogHeader>
             <DialogTitle>{draft.id ? "编辑节点" : "新建节点"}</DialogTitle>
             <DialogDescription>
-              VLESS 对齐 Xray-core v26.7.28；完整字段可在高级 JSON 中编辑。
+              {draft.protocol === "vless"
+                ? "VLESS 对齐 Xray-core v26.7.28；完整字段可在高级 JSON 中编辑。"
+                : "填写服务器地址和连接参数。"}
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -2042,15 +2171,13 @@ function NodeDialog({
                 />
               </Field>
               <Field>
-                <FieldLabel>协议</FieldLabel>
+                <FieldLabel htmlFor="node-protocol">协议</FieldLabel>
                 <Select
                   items={protocolItems}
                   value={draft.protocol}
-                  onValueChange={(value) =>
-                    update("protocol", value as Node["protocol"])
-                  }
+                  onValueChange={changeProtocol}
                 >
-                  <SelectTrigger className="w-full">
+                  <SelectTrigger id="node-protocol" className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent alignItemWithTrigger={false}>
@@ -2064,7 +2191,13 @@ function NodeDialog({
                   </SelectContent>
                 </Select>
               </Field>
-              <Field>
+              <Field
+                className={
+                  draft.protocol === "mieru" && !managedNode
+                    ? "sm:col-span-2"
+                    : undefined
+                }
+              >
                 <FieldLabel htmlFor="node-server">服务器</FieldLabel>
                 <Input
                   id="node-server"
@@ -2072,19 +2205,30 @@ function NodeDialog({
                   onChange={(event) => update("server", event.target.value)}
                 />
               </Field>
-              <Field>
-                <FieldLabel htmlFor="node-port">端口</FieldLabel>
-                <Input
-                  id="node-port"
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={draft.port}
-                  onChange={(event) =>
-                    update("port", Number(event.target.value))
-                  }
-                />
-              </Field>
+              {draft.protocol !== "mieru" ? (
+                <Field data-disabled={hopping || undefined}>
+                  <FieldLabel htmlFor="node-port">端口</FieldLabel>
+                  <Input
+                    id="node-port"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={draft.port}
+                    disabled={hopping}
+                    aria-describedby={
+                      hopping ? "node-port-description" : undefined
+                    }
+                    onChange={(event) =>
+                      update("port", Number(event.target.value))
+                    }
+                  />
+                  {hopping ? (
+                    <FieldDescription id="node-port-description">
+                      端口跳跃列表覆盖此端口。
+                    </FieldDescription>
+                  ) : null}
+                </Field>
+              ) : null}
               {managedNode ? (
                 <Field>
                   <FieldLabel>目标分组</FieldLabel>
@@ -2152,48 +2296,43 @@ function NodeDialog({
 
             <Separator />
 
-            <Field orientation="horizontal">
-              <Checkbox
-                id="node-udp"
-                checked={draft.udp}
-                onCheckedChange={(checked) => update("udp", checked)}
-                aria-describedby="node-udp-description"
-              />
-              <FieldContent>
-                <FieldLabel htmlFor="node-udp">启用 UDP</FieldLabel>
-                <FieldDescription id="node-udp-description">
-                  {draft.protocol === "vless"
-                    ? "禁用策略会保存，但通用 URI 无法保证客户端采用，禁用时不能分享。Xray JSON 也不包含此策略。"
-                    : "SOCKS URI 无法保证客户端采用 UDP 设置，启用时不能分享；关闭会改变节点策略，请确认后保存。"}
-                </FieldDescription>
-              </FieldContent>
-            </Field>
+            {draft.protocol === "vless" || draft.protocol === "socks5" ? (
+              <Field orientation="horizontal">
+                <Checkbox
+                  id="node-udp"
+                  checked={draft.udp}
+                  onCheckedChange={(checked) => update("udp", checked)}
+                  aria-describedby="node-udp-description"
+                />
+                <FieldContent>
+                  <FieldLabel htmlFor="node-udp">启用 UDP</FieldLabel>
+                  <FieldDescription id="node-udp-description">
+                    {draft.protocol === "vless"
+                      ? "禁用时请用 Mihomo YAML 分享；通用 URI、Base64 订阅和 Xray JSON 均不包含此策略。"
+                      : "启用时请用 Mihomo YAML 分享；SOCKS URI 和 Base64 订阅无法表达 UDP 设置。"}
+                  </FieldDescription>
+                </FieldContent>
+              </Field>
+            ) : null}
 
             {draft.protocol === "vless" ? (
               <Tabs
                 value={editorMode}
                 onValueChange={(value) => {
-                  const next = value as "basic" | "advanced"
-                  if (next === "advanced" && editorMode === "basic") {
-                    try {
-                      const current = JSON.parse(advancedJSON) as Record<
-                        string,
-                        unknown
-                      >
+                  if (value !== "basic" && value !== "advanced") return
+                  try {
+                    const current = parseEditorObject(advancedJSON, "Xray JSON")
+                    if (value === "advanced") {
                       setAdvancedJSON(
-                        JSON.stringify(
-                          mergeNodeIntoXray(current, draft),
-                          null,
-                          2
-                        )
+                        JSON.stringify(basicOutbound(current), null, 2)
                       )
-                    } catch {
-                      setAdvancedJSON(
-                        JSON.stringify(mergeNodeIntoXray({}, draft), null, 2)
-                      )
+                      setXhttpExtraEdit(undefined)
                     }
+                    setError("")
+                    setEditorMode(value)
+                  } catch (caught) {
+                    if (caught instanceof Error) setError(caught.message)
                   }
-                  setEditorMode(next)
                 }}
               >
                 <TabsList>
@@ -2555,6 +2694,28 @@ function NodeDialog({
                         </Select>
                       </Field>
                     ) : null}
+                    {draft.network === "xhttp" ? (
+                      <Field className="sm:col-span-2">
+                        <FieldLabel htmlFor="node-xhttp-extra">
+                          XHTTP Extra / XMUX
+                        </FieldLabel>
+                        <Textarea
+                          id="node-xhttp-extra"
+                          className="min-h-28 font-mono text-xs"
+                          placeholder={'{"xmux": {"maxConnections": "2-4"}}'}
+                          spellCheck={false}
+                          aria-describedby="node-xhttp-extra-description"
+                          value={xhttpExtraText}
+                          onChange={(event) =>
+                            setXhttpExtraEdit(event.target.value)
+                          }
+                        />
+                        <FieldDescription id="node-xhttp-extra-description">
+                          填写 JSON 对象，XMUX 放在 xmux 中。分享时自动编码为
+                          URI 的 extra 参数；留空清除高级选项。
+                        </FieldDescription>
+                      </Field>
+                    ) : null}
                     {draft.network === "mkcp" ? (
                       <>
                         <Field>
@@ -2684,6 +2845,23 @@ function NodeDialog({
                   </Field>
                 </TabsContent>
               </Tabs>
+            ) : draft.protocol === "hysteria2" ? (
+              <Hysteria2Fields
+                node={draft}
+                onChange={(changes) =>
+                  setDraft((current) => ({ ...current, ...changes }))
+                }
+              />
+            ) : draft.protocol === "mieru" ? (
+              draft.mieru && (
+                <MieruFields
+                  node={draft}
+                  options={draft.mieru}
+                  onChange={(changes) =>
+                    setDraft((current) => ({ ...current, ...changes }))
+                  }
+                />
+              )
             ) : (
               <FieldGroup className="grid gap-4 sm:grid-cols-2">
                 <Field>
@@ -2757,6 +2935,8 @@ function ShareDialog({
   const [shareMode, setShareMode] = useState<"temporary" | "permanent">(
     "temporary"
   )
+  const [shareFormat, setShareFormat] =
+    useState<ShareSubscriptionFormat>("base64")
   const [expiresHours, setExpiresHours] = useState(720)
   const [generatedShare, setGeneratedShare] = useState<Share | null>(null)
   const [historyShare, setHistoryShare] = useState<Share | null>(null)
@@ -2778,6 +2958,7 @@ function ShareDialog({
         body: JSON.stringify({
           kind: target.kind,
           id: target.id,
+          format: shareFormat,
           expires_hours: permanent ? 0 : expiresHours,
           permanent,
         }),
@@ -2835,6 +3016,7 @@ function ShareDialog({
           if (!next) {
             setActiveSection("create")
             setShareMode("temporary")
+            setShareFormat("base64")
             setExpiresHours(720)
             setGeneratedShare(null)
             setHistoryShare(null)
@@ -2882,6 +3064,36 @@ function ShareDialog({
                 </div>
               ) : (
                 <FieldGroup>
+                  <Field>
+                    <FieldLabel htmlFor="share-format">订阅格式</FieldLabel>
+                    <Select
+                      items={shareFormatItems}
+                      value={shareFormat}
+                      onValueChange={(value) => {
+                        if (value !== null) setShareFormat(value)
+                      }}
+                    >
+                      <SelectTrigger
+                        id="share-format"
+                        className="w-full"
+                        aria-describedby="share-format-description"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {shareFormatItems.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldDescription id="share-format-description">
+                      Mihomo YAML 仅包含代理节点（proxies）。
+                    </FieldDescription>
+                  </Field>
                   <Field>
                     <FieldLabel>分享类型</FieldLabel>
                     <Select
@@ -3047,6 +3259,7 @@ function ShareDetails({
         <Badge variant="outline">
           {share.kind === "node" ? "节点" : "分组"}
         </Badge>
+        <Badge variant="outline">{nodeFormatLabels[share.format]}</Badge>
         <Badge
           variant={
             share.revoked || share.expired
